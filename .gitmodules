@@ -1,0 +1,3 @@
+[submodule "innate-os"]
+	path = innate-os
+	url = https://github.com/innate-inc/innate-os.git
