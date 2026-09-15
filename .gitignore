@@ -1,0 +1,12 @@
+# colcon output (normally in the icarus_ws volume, but guard against in-repo builds)
+build/
+install/
+log/
+
+__pycache__/
+*.pyc
+*.egg-info/
+
+# Machine-specific values written by scripts/setup.sh
+docker/.env
+.env

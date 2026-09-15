@@ -1,0 +1,52 @@
+# ICARUS dev container. Use the wrappers from the repo root rather than calling this directly:
+#
+#   scripts/docker-build.sh        build the image (writes docker/.env)
+#   scripts/docker-shell.sh        start/join the container
+#   scripts/docker-shell.sh --sim  join the running simulator's network namespace
+#
+# ICARUS_NETWORK selects the network: bridge (default) or container:<sim container>, so
+# ROS traffic reaches the sim's Zenoh router on localhost.
+name: icarus
+
+services:
+  icarus:
+    image: icarus-dev:latest
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      args:
+        BASE_IMAGE: ${INNATE_BASE_IMAGE:-innate-os-sim-clean-innate:latest}
+      # Same reason as innate-os/sim/docker-compose.dev.yml: bridge-network builds
+      # can't reach a systemd-resolved host's 127.0.0.53 resolver.
+      network: host
+    network_mode: ${ICARUS_NETWORK:-bridge}
+    tty: true
+    stdin_open: true
+    shm_size: "2g"
+    # rmw_zenoh mlock()s its SHM pool; Docker's 64 KiB default makes that fail.
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    environment:
+      - ROS_DOMAIN_ID=0
+    volumes:
+      - ..:/root/icarus:rw
+      # The folder docker-shell.sh was run from, when it is outside this repo. The default
+      # is a harmless second view of the repo, since compose has no optional volumes.
+      - ${ICARUS_PWD_MOUNT:-..}:${ICARUS_PWD_MOUNT:-/root/.icarus-pwd}:rw
+      # Build trees live in volumes so neither checkout fills with colcon output.
+      - icarus_ws:/root/icarus_ws
+      - innate_build:/root/icarus/innate-os/ros2_ws/build
+      - innate_install:/root/icarus/innate-os/ros2_ws/install
+      - innate_log:/root/icarus/innate-os/ros2_ws/log
+      - ccache:/root/.cache/ccache
+      - ~/.ssh:/root/.ssh:ro
+      - ~/.gitconfig:/root/.gitconfig:ro
+
+volumes:
+  icarus_ws:
+  innate_build:
+  innate_install:
+  innate_log:
+  ccache:

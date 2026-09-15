@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep -n \"innate-sim\\\\|in_checkout\\\\|is_checkout\\\\|pwd\\\\b\" scripts/install-sim.sh | head -30; echo ---; sed -n '/^main\\(\\)/,$p' scripts/install-sim.sh)",
+      "Bash(git submodule *)",
+      "Bash(git -C innate-os remote -v)",
+      "Bash(git -C innate-os status -sb)",
+      "Bash(command -v docker sha256sum python3)",
+      "Bash(timeout 30 docker manifest inspect ghcr.io/innate-inc/innate-os-sim-deps:deps-fb03252463b371d55845b3456600808ade190a42c1aa94ef1f9b4e1f568c606b)",
+      "Bash(echo \"exit=$?\")",
+      "Bash(break)",
+      "Bash(scripts/docker-build.sh)",
+      "Bash(scripts/docker-shell.sh bash *)",
+      "Bash(scripts/docker-shell.sh hostname *)",
+      "Bash(scripts/docker-shell.sh --sim true)",
+      "Bash(scripts/docker-shell.sh --stop)",
+      "Bash(python3 -)",
+      "Bash(bash -n scripts/docker-shell.sh)"
+    ],
+    "additionalDirectories": [
+      "/home/tanay/icarus/innate-os/scripts"
+    ]
+  }
+}
