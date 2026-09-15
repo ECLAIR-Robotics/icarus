@@ -2,6 +2,10 @@
 # Open a shell in the icarus-dev container, starting it if needed. Every terminal that
 # runs this joins the same long-lived container, so builds and running nodes are shared.
 #
+# The shell opens in the directory you ran this from. Inside this repo that is the same
+# spot under /root/icarus; anywhere else, the folder is mounted at its host path (which
+# recreates the container if it wasn't mounted yet).
+#
 #   scripts/docker-shell.sh                  zsh in the container
 #   scripts/docker-shell.sh <cmd> [args...]  run one command, e.g. scripts/docker-shell.sh scripts/build.sh
 #   scripts/docker-shell.sh --sim            attach to the running simulator's network first
@@ -24,7 +28,7 @@ while [ $# -gt 0 ]; do
         --sim) sim=1 ;;
         --restart) restart=1 ;;
         --stop) exec "${COMPOSE[@]}" down ;;
-        -h | --help) sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h | --help) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) break ;;
     esac
     shift
@@ -38,9 +42,32 @@ if [ ! -f "$ENV_FILE" ] || ! docker image inspect icarus-dev:latest >/dev/null 2
     "$ICARUS_ROOT/scripts/docker-build.sh"
 fi
 
+host_pwd="$(pwd -P)"
+repo_real="$(cd "$ICARUS_ROOT" && pwd -P)"
+case "$host_pwd/" in
+    "$repo_real"/*)
+        workdir="/root/icarus${host_pwd#"$repo_real"}"
+        ;;
+    *)
+        case "$host_pwd" in
+            / | /root | /root/* | /opt | /opt/* | /usr | /usr/* | /etc | /etc/* | /bin | /bin/* | \
+                /lib | /lib/* | /proc | /proc/* | /sys | /sys/* | /dev | /dev/*)
+                die "Refusing to mount $host_pwd: it would shadow the container's own $host_pwd. cd somewhere else." ;;
+        esac
+        workdir="$host_pwd"
+        export ICARUS_PWD_MOUNT="$host_pwd"
+        ;;
+esac
+
 container="$("${COMPOSE[@]}" ps -q icarus 2>/dev/null || true)"
 current_net=""
-[ -z "$container" ] || current_net="$(docker inspect -f '{{.HostConfig.NetworkMode}}' "$container")"
+if [ -n "$container" ]; then
+    current_net="$(docker inspect -f '{{.HostConfig.NetworkMode}}' "$container")"
+    if [ -n "${ICARUS_PWD_MOUNT:-}" ] &&
+        ! docker inspect -f '{{range .Mounts}}{{.Destination}}{{"\n"}}{{end}}' "$container" | grep -qFx "$workdir"; then
+        restart=1
+    fi
+fi
 
 if [ "$sim" -eq 1 ]; then
     sim_name="$(sed -n 's/^INNATE_SIM_CONTAINER=//p' "$ENV_FILE")"
@@ -57,7 +84,8 @@ fi
 
 if [ -z "$container" ] || [ "$restart" -eq 1 ]; then
     [ -z "$container" ] || note "Recreating the icarus container (other open shells will close)."
-    "${COMPOSE[@]}" up -d --force-recreate icarus >/dev/null
+    "${COMPOSE[@]}" up -d --force-recreate icarus >/dev/null ||
+        die "Could not start the container. If Docker said 'mounts denied', add $host_pwd to Docker Desktop's File Sharing, or run from a shared folder such as your home directory."
 fi
 
 if [ $# -eq 0 ]; then
@@ -65,4 +93,4 @@ if [ $# -eq 0 ]; then
 fi
 tty_flag=()
 [ -t 0 ] && [ -t 1 ] || tty_flag=(-T)
-exec "${COMPOSE[@]}" exec ${tty_flag[@]+"${tty_flag[@]}"} icarus /usr/local/bin/icarus-entrypoint "$@"
+exec "${COMPOSE[@]}" exec -w "$workdir" ${tty_flag[@]+"${tty_flag[@]}"} icarus /usr/local/bin/icarus-entrypoint "$@"

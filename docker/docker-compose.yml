@@ -32,6 +32,9 @@ services:
       - ROS_DOMAIN_ID=0
     volumes:
       - ..:/root/icarus:rw
+      # The folder docker-shell.sh was run from, when it is outside this repo. The default
+      # is a harmless second view of the repo, since compose has no optional volumes.
+      - ${ICARUS_PWD_MOUNT:-..}:${ICARUS_PWD_MOUNT:-/root/.icarus-pwd}:rw
       # Build trees live in volumes so neither checkout fills with colcon output.
       - icarus_ws:/root/icarus_ws
       - innate_build:/root/icarus/innate-os/ros2_ws/build

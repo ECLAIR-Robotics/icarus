@@ -81,7 +81,6 @@ RUN cat >> /root/.zshrc <<'EOF'
 [ -f /root/icarus_ws/install/setup.zsh ] && source /root/icarus_ws/install/setup.zsh
 export PATH="/root/icarus/scripts:$PATH"
 alias icarus-build='/root/icarus/scripts/build.sh'
-cd /root/icarus 2>/dev/null
 EOF
 
 WORKDIR /root/icarus

@@ -69,7 +69,9 @@ Things from Innate that matter when writing ICARUS code:
 - `scripts/docker-build.sh` builds the image (after a submodule bump or Dockerfile edit).
   `scripts/docker-shell.sh` starts one long-lived container and every terminal joins it;
   `scripts/docker-shell.sh <cmd>` runs a single command; `--restart` recreates it and
-  `--stop` removes it (build volumes survive).
+  `--stop` removes it (build volumes survive). The shell opens in the directory the script
+  was run from: inside this repo that is the matching path under `/root/icarus`; outside
+  it, the folder is mounted at its host path (recreating the container if it isn't yet).
 - The image is `docker/Dockerfile`, built on `ghcr.io/innate-inc/innate-os-sim-deps:deps-<hash>`.
   That is the same apt/pip stack as the simulator, and the hash comes from
   `python3 innate-os/sim/launcher/config.py deps-image-hash`. `scripts/docker-build.sh` resolves it
