@@ -1,0 +1,13 @@
+[project]
+name = "icarus-mjwarp"
+version = "0.1.0"
+description = "GPU-batched MuJoCo Warp environment for MARS, built on mars_sim_driver's robot model."
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "mujoco>=3.8.0",
+    "mujoco-warp",
+    "numpy",
+]
+
+[tool.uv]
+package = false
