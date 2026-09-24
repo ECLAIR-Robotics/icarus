@@ -30,6 +30,9 @@ services:
         hard: -1
     environment:
       - ROS_DOMAIN_ID=0
+      # Forward the host's ssh-agent instead of mounting ~/.ssh: git over ssh (submodule
+      # fetches, pushes) works without ever putting private keys inside the container.
+      - SSH_AUTH_SOCK=/ssh-agent
     volumes:
       - ..:/root/icarus:rw
       # The folder docker-shell.sh was run from, when it is outside this repo. The default
@@ -41,7 +44,7 @@ services:
       - innate_install:/root/icarus/innate-os/ros2_ws/install
       - innate_log:/root/icarus/innate-os/ros2_ws/log
       - ccache:/root/.cache/ccache
-      - ~/.ssh:/root/.ssh:ro
+      - ${SSH_AUTH_SOCK:-/dev/null}:/ssh-agent:ro
       - ~/.gitconfig:/root/.gitconfig:ro
 
 volumes:

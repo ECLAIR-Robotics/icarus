@@ -84,6 +84,9 @@ check_platform() {
             fi
             ;;
         Darwin)
+            # Docker Desktop installs its CLI into ~/.docker/bin, which is not on PATH
+            # by default, so `have docker` would otherwise fail even when it's installed.
+            export PATH="$HOME/.docker/bin:$PATH"
             have docker || die "Install Docker Desktop (https://docs.docker.com/desktop/install/mac-install/), open it once, then re-run."
             ;;
         *) die "Unsupported OS $(uname -s). Use Linux, WSL2, or macOS." ;;
@@ -111,6 +114,9 @@ install_host_tools() {
     local uv
     uv="$(command -v uv || echo "$HOME/.local/bin/uv")"
     if [ ! -x "$uv" ]; then
+        # --skip-sim bypasses innate-os's installer, which may be what provides curl on a
+        # minimal host, so make sure it's here before relying on it.
+        have curl || apt_install curl
         curl -LsSf https://astral.sh/uv/install.sh | sh
         uv="$HOME/.local/bin/uv"
     fi
@@ -185,19 +191,24 @@ setup_robot() {
         warn "rosdep could not resolve every key; the build will name anything truly missing"
 
     step "Building the icarus overlay"
-    INNATE_OS_ROOT="$INNATE_OS_ROOT" "$ICARUS_ROOT/scripts/build.sh"
+    local icarus_ws="${ICARUS_WS:-$HOME/icarus_ws}"
+    INNATE_OS_ROOT="$INNATE_OS_ROOT" ICARUS_WS="$icarus_ws" "$ICARUS_ROOT/scripts/build.sh"
 
-    local rc="$HOME/.zshrc" line="[ -f \$HOME/icarus_ws/install/setup.zsh ] && source \$HOME/icarus_ws/install/setup.zsh"
-    if [ -f "$rc" ] && ! grep -qF "icarus_ws/install/setup.zsh" "$rc"; then
+    local rc="$HOME/.zshrc" line="[ -f $icarus_ws/install/setup.zsh ] && source $icarus_ws/install/setup.zsh"
+    if [ -f "$rc" ] && ! grep -qF "$icarus_ws/install/setup.zsh" "$rc"; then
         printf '\n# ICARUS overlay\n%s\n' "$line" >>"$rc"
     fi
+
+    local rebuild_cmd="$ICARUS_ROOT/scripts/build.sh"
+    [ "$INNATE_OS_ROOT" = "$HOME/innate-os" ] || rebuild_cmd="INNATE_OS_ROOT=$INNATE_OS_ROOT $rebuild_cmd"
+    [ "$icarus_ws" = "$HOME/icarus_ws" ] || rebuild_cmd="ICARUS_WS=$icarus_ws $rebuild_cmd"
 
     cat <<EOF
 
 $(printf '\033[1;32m')ICARUS installed on the robot.$(printf '\033[0m')
-  Open a new shell (or: source ~/icarus_ws/install/setup.zsh), then:
+  Open a new shell (or: source $icarus_ws/install/setup.zsh), then:
     ros2 launch icarus icarus.launch.py
-  After pulling changes: $ICARUS_ROOT/scripts/build.sh
+  After pulling changes: $rebuild_cmd
 EOF
 }
 

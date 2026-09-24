@@ -309,7 +309,11 @@ have() { command -v "$1" >/dev/null 2>&1; }
 # still worth having, and the reason is printed at the end where it is read.
 blocked() { BLOCKED_REASON=$1; }
 
-is_git_checkout() { git -C "$1" rev-parse --git-dir >/dev/null 2>&1; }
+# A git checkout is not enough: INNATE_DIR could be pointed at an unrelated
+# repo, and update_checkout would then fetch/merge that repo's own "origin"
+# using our $REF. The innate-sim launcher script is the marker that it is
+# actually an innate-os checkout.
+is_innate_checkout() { git -C "$1" rev-parse --git-dir >/dev/null 2>&1 && [ -x "$1/innate-sim" ]; }
 
 # A path is user input: it can hold spaces, and it can hold an apostrophe --
 # which would close the quoting of any command we build around it. Both of
@@ -538,7 +542,7 @@ Run these two commands:
     fi
     if [ "$ADOPTED_CHECKOUT" -eq 0 ] &&
         [ -d "$INNATE_DIR" ] &&
-        ! is_git_checkout "$INNATE_DIR" &&
+        ! is_innate_checkout "$INNATE_DIR" &&
         [ -n "$(ls -A "$INNATE_DIR" 2>/dev/null)" ]; then
         die "$INNATE_DIR already exists and is not an innate-os checkout. Move it aside, or set INNATE_DIR."
     fi
@@ -570,7 +574,7 @@ build_plan() {
     uv_installed || plan_add "Install uv, which runs the physics world (user-local, no sudo)" "$DISK_GB_UV"
     if [ "$ADOPTED_CHECKOUT" -eq 1 ]; then
         plan_add "Set up the innate-os checkout you are in ($INNATE_DIR)" 0
-    elif is_git_checkout "$INNATE_DIR"; then
+    elif is_innate_checkout "$INNATE_DIR"; then
         plan_add "Update the innate-os checkout in $INNATE_DIR" 0
     else
         plan_add "Clone innate-os ($REF) into $INNATE_DIR" "$DISK_GB_CLONE"
@@ -830,7 +834,7 @@ clone_repo() {
         note "using $INNATE_DIR at $(git -C "$INNATE_DIR" rev-parse --short HEAD)"
         return 0
     fi
-    if is_git_checkout "$INNATE_DIR"; then
+    if is_innate_checkout "$INNATE_DIR"; then
         step "repo" "Updating $INNATE_DIR" "updated $INNATE_DIR" update_checkout || die "Could not update $INNATE_DIR."
     else
         git ls-remote --exit-code --heads "$REPO_URL" "$REF" >/dev/null 2>&1 ||
@@ -1016,81 +1020,6 @@ with_docker_group_or_plain() {
     fi
     report_relogin
     exit 0
-}
-
-report_blocked() {
-    printf '\n'
-    labelled "blocked" "$YELLOW" "$BLOCKED_REASON"
-    printf '\n'
-    # The installer, not `innate-sim setup`: a Docker installed by hand brings
-    # its own Compose, which may be a 5.x that cannot mount the sim's assets --
-    # setup would only refuse it, while this fixes it and carries on.
-    printf '  %s%8s%s  when that is done, run this again:\n\n' "$BOLD" "next" "$NC"
-    printf '  %8s  cd %s\n' "" "$(display_path "$INNATE_DIR")"
-    printf '  %8s  sh scripts/install-sim.sh\n\n' ""
-    note "everything else is installed and the checkout is ready, so it will be quick"
-    printf '\n'
-}
-
-# The launcher's wordmark (dashboard.ASCII_BANNER) and its green-to-gold
-# gradient, so the install ends in the same skin the dashboard opens in.
-logo_color() {
-    [ -n "$NC" ] || return 0
-    if [ "$TRUECOLOR" -eq 0 ]; then
-        printf '\033[36m'
-        return 0
-    fi
-    case "$1" in
-        1) printf '\033[38;2;119;202;155m' ;;
-        2) printf '\033[38;2;140;199;140m' ;;
-        3) printf '\033[38;2;164;196;126m' ;;
-        4) printf '\033[38;2;185;194;115m' ;;
-        *) printf '\033[38;2;203;192;108m' ;;
-    esac
-}
-
-print_logo() {
-    i=0
-    while IFS= read -r line; do
-        i=$((i + 1))
-        printf '%s%s%s%s\n' "$(logo_color "$i")" "$BOLD" "$line" "$NC"
-    done <<'EOF'
- ___ _   _ _   _    _  _____ _____
-|_ _| \ | | \ | |  / \|_   _| ____|
- | ||  \| |  \| | / _ \ | | |  _|
- | || |\  | |\  |/ ___ \| | | |___
-|___|_| \_|_| \_/_/   \_\_| |_____|
-EOF
-}
-
-print_intro() {
-    printf '\n'
-    print_logo
-    printf '  %ssimulator installer%s\n\n' "$DIM" "$NC"
-}
-
-detect_editor() {
-    for candidate in cursor code windsurf zed subl; do
-        if have "$candidate"; then
-            printf '%s' "$candidate"
-            return 0
-        fi
-    done
-    return 1
-}
-
-report_blocked() {
-    printf '\n'
-    labelled "blocked" "$YELLOW" "$BLOCKED_REASON"
-    printf '\n'
-    # The installer, not `innate-sim setup`: a Docker installed by hand brings
-    # its own Compose, which may be a 5.x that cannot mount the sim's assets --
-    # setup would only refuse it, while this fixes it and carries on.
-    printf '  %s%8s%s  when that is done, run this again:\n\n' "$BOLD" "next" "$NC"
-    printf '  %8s  cd %s\n' "" "$(display_path "$INNATE_DIR")"
-    printf '  %8s  sh scripts/install-sim.sh\n\n' ""
-    note "everything else is installed and the checkout is ready, so it will be quick"
-    printf '\n'
 }
 
 report_relogin() {
