@@ -60,6 +60,12 @@ RUN rm -rf /root/innate-os && \
     ln -s /root/icarus/innate-os /root/innate-os && \
     mkdir -p /root/icarus /root/icarus_ws
 
+# /root/icarus is a host bind mount, so its files keep the host UID while this container
+# runs as root; without this, git's ownership check rejects `git status`/submodule
+# commands in the dev shell. The host ~/.gitconfig is mounted read-only, so it is set here.
+RUN git config --system --add safe.directory /root/icarus && \
+    git config --system --add safe.directory /root/icarus/innate-os
+
 # Non-interactive commands (`docker compose run icarus ros2 launch ...`) get the same
 # environment an interactive zsh does: ROS, Zenoh transport, underlay, then overlay.
 COPY --chmod=755 <<'EOF' /usr/local/bin/icarus-entrypoint

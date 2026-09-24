@@ -76,7 +76,12 @@ if [ "$sim" -eq 1 ]; then
         die "Simulator container $sim_name is not running. Start it with: cd innate-os && ./innate-sim up"
     export ICARUS_NETWORK="container:$sim_name"
     # A restarted sim is a new container; a shell still in the old one's network sees nothing.
-    [ "$current_net" = "container:$sim_id" ] || [ -z "$container" ] || restart=1
+    # Docker may record NetworkMode using either the name or the id given at creation, so
+    # resolve whatever $current_net points at before comparing, rather than assuming an id.
+    current_sim_ref="${current_net#container:}"
+    current_sim_id=""
+    [ "$current_net" = "$current_sim_ref" ] || current_sim_id="$(docker inspect -f '{{.Id}}' "$current_sim_ref" 2>/dev/null || true)"
+    [ "$current_sim_id" = "$sim_id" ] || [ -z "$container" ] || restart=1
 elif [[ "$current_net" == container:* ]]; then
     # Keep an existing sim attachment rather than yanking it out from under other shells.
     export ICARUS_NETWORK="$current_net"

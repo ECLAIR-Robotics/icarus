@@ -1,0 +1,10 @@
+# docker/Dockerfile never COPYs source (everything is bind-mounted at runtime), so none
+# of this needs to be in the build context. innate-os and .git are the large ones.
+innate-os/
+.git/
+build/
+install/
+log/
+__pycache__/
+*.pyc
+*.egg-info/
