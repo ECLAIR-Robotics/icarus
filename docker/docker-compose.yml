@@ -33,6 +33,11 @@ services:
       # Forward the host's ssh-agent instead of mounting ~/.ssh: git over ssh (submodule
       # fetches, pushes) works without ever putting private keys inside the container.
       - SSH_AUTH_SOCK=/ssh-agent
+
+      # WandB information to connect to CurseForge project. API key is set by each user.
+      - WANDB_API_KEY
+      - WANDB_PROJECT=Icarus-Sim
+      - WANDB_ENTITY=ECLAIR-Icarus
     volumes:
       - ..:/root/icarus:rw
       # The folder docker-shell.sh was run from, when it is outside this repo. The default
