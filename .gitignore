@@ -10,3 +10,6 @@ __pycache__/
 # Machine-specific values written by scripts/setup.sh
 docker/.env
 .env
+
+# WandB debug logs
+wandb/

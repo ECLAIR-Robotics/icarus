@@ -51,7 +51,8 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
         basedpyright \
         ipython \
         pre-commit \
-        ruff && \
+        ruff \
+        wandb && \
     uv pip install --system 'setuptools==59.6.0'
 
 # The base image made /root/innate-os a directory of empty mount points for
