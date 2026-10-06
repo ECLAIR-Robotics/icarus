@@ -21,6 +21,16 @@ COMPOSE=(docker compose -f "$ICARUS_ROOT/docker/docker-compose.yml")
 die() { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 note() { printf '\033[1;34m==>\033[0m %s\n' "$*" >&2; }
 
+# GPU passthrough is an opt-in override: a device reservation with no matching GPU makes
+# `docker compose up` fail outright, so only add it when an NVIDIA GPU is actually present.
+# (This only checks the host driver, not whether the Container Toolkit/CDI is configured
+# for Docker -- `docker compose up` will still fail clearly if that part is missing.)
+if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
+    COMPOSE+=(-f "$ICARUS_ROOT/docker/docker-compose.gpu.yml")
+else
+    note "No NVIDIA GPU detected -- running without GPU passthrough (mjwarp falls back to CPU, slower)."
+fi
+
 sim=0
 restart=0
 while [ $# -gt 0 ]; do

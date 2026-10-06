@@ -1,6 +1,6 @@
 import mujoco
 
-import _driver_pkg 
+import _driver_pkg
 from mars_sim_driver import world
 
 _GROUND_XML = """
@@ -13,12 +13,41 @@ _GROUND_XML = """
 </mujoco>
 """
 
+# Matches sim/sandbox/drive_mars.py's own placeholder servo feel (world.py's DRIVEN_JOINTS).
+ARM_HEAD_JOINTS =  [f"joint{i}" for i in range(1, 7)] + ["joint_head"]
+KP_JOINT = 8.0
+KD_JOINT = 0.6
+
+BASE_JOINTS = ["base_x", "base_y", "base_yaw"]
+
+
+def _add_actuators(robot_spec: mujoco.MjSpec) -> None:
+    """Position actuators on the arm/head (the real hardware is position-servoed) and
+    motor actuators on the planar base (force-driven, PD-tracked in ros_bridge.py the
+    same way apply_drive_force does for the sandbox's test robot)."""
+    for name in ARM_HEAD_JOINTS:
+        act = robot_spec.add_actuator()
+        act.name = f"{name}_act"
+        act.target = name
+        act.trntype = mujoco.mjtTrn.mjTRN_JOINT
+        act.set_to_position(kp=KP_JOINT, kv=KD_JOINT)
+
+    for name in BASE_JOINTS:
+        act = robot_spec.add_actuator()
+        act.name = f"{name}_act"
+        act.target = name
+        act.trntype = mujoco.mjtTrn.mjTRN_JOINT
+        act.set_to_motor()
+
+
 def build_model() -> mujoco.MjModel:
     world_spec = mujoco.MjSpec.from_string(_GROUND_XML)
     robot_spec = world.load_robot_spec(world.default_urdf_path())
     world.add_planar_base(robot_spec)
     world.tune_contacts(robot_spec)
-    world_spec.attach(robot_spec, frame=world_spec.worldbody.add_frame(), prefix="robot_")
+    _add_actuators(robot_spec)
+    world_spec.attach(
+        robot_spec, frame=world_spec.worldbody.add_frame(), prefix="robot_")
     model = world_spec.compile()
     world.style_robot_geoms(model)
     return model

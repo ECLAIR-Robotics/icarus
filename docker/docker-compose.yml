@@ -30,6 +30,10 @@ services:
         hard: -1
     environment:
       - ROS_DOMAIN_ID=0
+    # GPU passthrough is an override (docker/docker-compose.gpu.yml), not baked in here:
+    # a `deploy.resources.reservations.devices` block with no matching GPU on the host
+    # makes `docker compose up` fail outright, before any Python code gets a chance to
+    # fall back to CPU. scripts/docker-shell.sh adds the override only when a GPU is found.
     volumes:
       - ..:/root/icarus:rw
       # The folder docker-shell.sh was run from, when it is outside this repo. The default
@@ -43,6 +47,8 @@ services:
       - ccache:/root/.cache/ccache
       - ~/.ssh:/root/.ssh:ro
       - ~/.gitconfig:/root/.gitconfig:ro
+    ports:  
+     - "8765:8765"
 
 volumes:
   icarus_ws:
