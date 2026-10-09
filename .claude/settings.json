@@ -16,9 +16,6 @@
       "Bash(scripts/docker-shell.sh --stop)",
       "Bash(python3 -)",
       "Bash(bash -n scripts/docker-shell.sh)"
-    ],
-    "additionalDirectories": [
-      "/home/tanay/icarus/innate-os/scripts"
     ]
   }
 }
