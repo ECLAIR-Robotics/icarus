@@ -46,6 +46,8 @@ services:
       - ccache:/root/.cache/ccache
       - ${SSH_AUTH_SOCK:-/dev/null}:/ssh-agent:ro
       - ~/.gitconfig:/root/.gitconfig:ro
+    ports:  
+     - "8765:8765"
 
 volumes:
   icarus_ws:

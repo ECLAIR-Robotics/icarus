@@ -41,6 +41,9 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         nano \
         python3-venv \
         ripgrep \
+        ros-humble-foxglove-bridge \
+        ros-humble-robot-state-publisher \
+        ros-humble-teleop-twist-keyboard \
         rsync \
         vim
 
@@ -53,6 +56,15 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
         pre-commit \
         ruff && \
     uv pip install --system 'setuptools==59.6.0'
+
+# Adds MJWarp to the system.
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+    uv pip install --system 'mujoco>=3.8.0' mujoco-warp numpy
+
+# mars_control's keyboard.py (pynput) is declared in innate-os's own pip requirements but
+# never installed into this image -- that happens elsewhere in Innate's own provisioning.
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+    uv pip install --system pynput
 
 # The base image made /root/innate-os a directory of empty mount points for
 # innate-os's compose file; here the submodule arrives inside the icarus mount.

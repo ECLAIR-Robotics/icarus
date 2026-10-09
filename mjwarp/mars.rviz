@@ -1,0 +1,125 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+  - Class: rviz_common/Views
+    Name: Views
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Name: Grid
+      Enabled: true
+      Reference Frame: <Fixed Frame>
+      Cell Size: 1
+      Plane Cell Count: 12
+      Color: 160; 160; 164
+    - Class: rviz_default_plugins/RobotModel
+      Name: Robot
+      Enabled: true
+      Description Source: Topic
+      Description Topic:
+        Value: /robot_description
+        Depth: 1
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+      Visual Enabled: true
+      Collision Enabled: false
+    - Class: rviz_default_plugins/TF
+      Name: TF
+      Enabled: false
+      Show Names: true
+      Show Axes: true
+      Show Arrows: false
+      Marker Scale: 0.3
+    - Class: rviz_default_plugins/LaserScan
+      Name: Lidar /scan
+      Enabled: true
+      Topic:
+        Value: /scan
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+      Style: Points
+      Size (Pixels): 4
+      Color Transformer: FlatColor
+      Color: 255; 60; 60
+      Decay Time: 0
+    - Class: rviz_default_plugins/Odometry
+      Name: Odometry /odom
+      Enabled: true
+      Topic:
+        Value: /odom
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+      Keep: 100
+      Position Tolerance: 0.05
+      Angle Tolerance: 0.1
+      Shape:
+        Value: Arrow
+        Color: 255; 200; 0
+        Alpha: 1
+        Shaft Length: 0.2
+        Shaft Radius: 0.02
+        Head Length: 0.06
+        Head Radius: 0.04
+      Covariance:
+        Value: false
+    - Class: rviz_default_plugins/Image
+      Name: Head camera
+      Enabled: true
+      Topic:
+        Value: /mars/main_camera/left/image_raw
+        Depth: 1
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+    - Class: rviz_default_plugins/Image
+      Name: Head depth
+      Enabled: true
+      Topic:
+        Value: /mars/main_camera/depth/image_rect_raw
+        Depth: 1
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+      Normalize Range: false
+      Min Value: 0
+      Max Value: 2000
+    - Class: rviz_default_plugins/Image
+      Name: Wrist camera
+      Enabled: true
+      Topic:
+        Value: /mars/arm/image_raw
+        Depth: 1
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+  Global Options:
+    Fixed Frame: odom
+    Background Color: 40; 40; 44
+    Frame Rate: 30
+  Tools:
+    - Class: rviz_default_plugins/Interact
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/Measure
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Name: Current View
+      Target Frame: base_link
+      Distance: 3.5
+      Focal Point:
+        X: 0
+        Y: 0
+        Z: 0.2
+      Pitch: 0.6
+      Yaw: 3.6
+    Saved: ~
+Window Geometry:
+  Width: 1600
+  Height: 1000

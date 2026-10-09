@@ -1,0 +1,13 @@
+# GPU passthrough override, applied on top of docker-compose.yml only when
+# scripts/docker-shell.sh detects an NVIDIA GPU on the host. Needs the NVIDIA Container
+# Toolkit configured for Docker (CDI) -- see mjwarp/README or the setup conversation for
+# `nvidia-ctk runtime configure` / `nvidia-ctk cdi generate`.
+services:
+  icarus:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
