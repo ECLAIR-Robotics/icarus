@@ -69,7 +69,9 @@ def build_model() -> mujoco.MjModel:
     model = spec.compile()
     world.style_robot_geoms(model)
     _hide_head_from_cameras(model)
+    _make_chassis_frictionless(model)
     _set_home_pose(model)
+    _align_drive_with_com(model)
     return model
 
 
@@ -168,6 +170,29 @@ def _hide_head_from_cameras(model: mujoco.MjModel) -> None:
     for body in ("robot_head", "robot_head_camera_left", "robot_head_camera_right"):
         visual = (model.geom_bodyid == model.body(body).id) & (model.geom_group == world.VISUAL_GROUP)
         model.geom_group[visual] = _CAMERA_HIDDEN_GROUP
+
+
+def _make_chassis_frictionless(model: mujoco.MjModel) -> None:
+    """The chassis box's bottom face sits exactly on the floor. In float32 (mujoco_warp) that
+    contact flickers on and off with ~0 penetration, and each flicker's friction drags and
+    yaws the planar base, so driving straight veers right. Same treatment as the wheels in
+    world.tune_contacts: the base is held up by its planar joints, not by floor contact."""
+    chassis = model.geom("robot_base_chassis")
+    chassis.condim = 1
+    chassis.priority = 1
+
+
+def _align_drive_with_com(model: mujoco.MjModel) -> None:
+    """The robot's centre of mass sits ~1.3 cm to the side of base_link's origin at the home
+    pose. Pushing at the origin therefore yaws the base on every acceleration and braking
+    (the yaw servo only damps rate, so the heading offset stays until the opposite
+    transient). Putting the drive force on the COM's lateral line removes that torque."""
+    data = mujoco.MjData(model)
+    mujoco.mj_resetDataKeyframe(model, data, model.key("home").id)
+    mujoco.mj_forward(model, data)
+    base = model.body("robot_base_link").id
+    com_in_base = data.xmat[base].reshape(3, 3).T @ (data.subtree_com[base] - data.xpos[base])
+    model.site("base_drive").pos[1] = com_in_base[1]
 
 
 def _set_home_pose(model: mujoco.MjModel) -> None:
