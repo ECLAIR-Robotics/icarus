@@ -9,6 +9,7 @@ if not wp.is_cuda_available():
     print("No CUDA-capable GPU found -- falling back to Warp's CPU backend (correct, much slower).")
     wp.set_device("cpu")
 
+import pole as pole_lib
 from robot_env import ARM_JOINTS, CAMERA_GEOM_GROUPS, HEAD_CAMERA, LIDAR_RAYS, WRIST_CAMERA, build_model
 
 
@@ -19,10 +20,16 @@ DEPTH_SCALE_M = 10.0
 
 class MarsWarpEnv:
     """`nworld` MARS robots simulated in parallel on the GPU. Commands take a scalar (all
-    worlds) or one value per world; each `step()` advances one control period."""
+    worlds) or one value per world; each `step()` advances one control period.
 
-    def __init__(self, nworld: int = 1, control_hz: float = 50.0, cameras: bool = False) -> None:
-        self.mj_model = build_model()
+    `pole=True` mounts an unactuated pole on the robot that the base drive is meant to
+    balance; see `pole_observation()`. Without it the robot is the plain loader/controller."""
+
+    def __init__(
+        self, nworld: int = 1, control_hz: float = 50.0, cameras: bool = False, pole: bool = False
+    ) -> None:
+        self.pole = pole
+        self.mj_model = build_model(pole=pole)
         self.model = mjw.put_model(self.mj_model)
         self.data = mjw.make_data(self.mj_model, nworld=nworld)
         self.nworld = nworld
@@ -36,6 +43,13 @@ class MarsWarpEnv:
         self._yaw_id = self.mj_model.actuator("base_yaw").id
         first_beam = self.mj_model.sensor("lidar_0").adr[0]
         self.lidar_slice = slice(first_beam, first_beam + LIDAR_RAYS)
+
+        if pole:
+            self._rng = np.random.default_rng()
+            self._pole_qpos, self._pole_dof = pole_lib.joint_addrs(self.mj_model, "robot_pole")
+            self._base_x = pole_lib.joint_addrs(self.mj_model, "robot_base_x")
+            self._base_y = pole_lib.joint_addrs(self.mj_model, "robot_base_y")
+            self._prev_action = np.zeros((nworld, 2), dtype=np.float32)
 
         self._step_graph: wp.Graph | None = None
         self._snapshot = mujoco.MjData(self.mj_model)
@@ -60,7 +74,34 @@ class MarsWarpEnv:
         home = self.mj_model.key("home")
         mjw.reset_data_keyframe(self.model, self.data, home.id)
         self.ctrl[:] = home.ctrl
+        if self.pole:
+            qpos = self.data.qpos.numpy()
+            pole_lib.tilt_pole(qpos, self._pole_qpos, self._rng, np.ones(self.nworld, dtype=bool))
+            self.data.qpos.assign(qpos)
+            self._prev_action[:] = 0.0
         mjw.forward(self.model, self.data)
+
+    def _drive_command(self) -> np.ndarray:
+        return self.ctrl[:, [self._forward_id, self._yaw_id]]
+
+    def pole_observation(self) -> np.ndarray:
+        """(nworld, pole.OBS_DIM): pole axis, pole angular velocity, base x/y/vx/vy and the
+        current drive command. Reads device state back to the host."""
+        if not self.pole:
+            raise RuntimeError("MarsWarpEnv was created with pole=False")
+        qpos, qvel = self.data.qpos.numpy(), self.data.qvel.numpy()
+        obs = np.empty((self.nworld, pole_lib.OBS_DIM), dtype=np.float32)
+        obs[:, 0:3] = pole_lib.pole_axis(qpos[:, self._pole_qpos : self._pole_qpos + 4])
+        obs[:, 3:6] = qvel[:, self._pole_dof : self._pole_dof + 3]
+        obs[:, 6] = qpos[:, self._base_x[0]]
+        obs[:, 7] = qpos[:, self._base_y[0]]
+        obs[:, 8] = qvel[:, self._base_x[1]]
+        obs[:, 9] = qvel[:, self._base_y[1]]
+        obs[:, 10:12] = self._drive_command()
+        return obs
+
+    # TODO: the balancing controller. Step the env with drive() from a policy/controller
+    # and score it with pole.reward(); the pole helpers are ready, the control law isn't.
 
     def drive(self, forward: float | np.ndarray, turn: float | np.ndarray) -> None:
         """Base velocity in m/s and rad/s, like /cmd_vel."""

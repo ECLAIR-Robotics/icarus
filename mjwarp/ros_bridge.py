@@ -11,11 +11,13 @@ from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import CameraInfo, Image, JointState, LaserScan
-from std_msgs.msg import Float64MultiArray, Header, Int32
+from std_msgs.msg import ColorRGBA, Float64MultiArray, Header, Int32
 from tf2_ros import TransformBroadcaster
+from visualization_msgs.msg import Marker
 
 import _driver_pkg  # noqa: F401 -- puts mars_sim_driver on sys.path
 from mars_sim_driver.constants import CAMERA_CX, CAMERA_CY, CAMERA_FX, CAMERA_FY, CAMERA_HEIGHT, CAMERA_WIDTH
+from pole import POLE_LENGTH, POLE_PIVOT_Z, POLE_RADIUS
 from robot_env import ARM_JOINTS, DRIVEN_JOINTS, HEAD_CAMERA, LIDAR_RAYS, WRIST_CAMERA
 from warp_env import MarsWarpEnv
 
@@ -25,6 +27,7 @@ SCAN_HZ = 6.0
 HEAD_CAMERA_HZ = 10.0
 WRIST_CAMERA_HZ = 6.0
 DEPTH_HZ = 8.0
+POLE_MARKER_HZ = 30.0
 
 CMD_VEL_TIMEOUT_S = 0.5
 LIDAR_RANGE_MIN, LIDAR_RANGE_MAX = 0.15, 12.0
@@ -64,7 +67,7 @@ def head_camera_info(header: Header) -> CameraInfo:
 class MarsSimBridge(Node):
     def __init__(self) -> None:
         super().__init__("mars_warp_sim")
-        self.env = MarsWarpEnv(cameras=True)
+        self.env = MarsWarpEnv(cameras=True, pole=self.declare_parameter("pole", False).value)
 
         # Warp JIT-compiles each kernel the first time it actually runs, printing one
         # "...(compiled)" line per kernel -- there's no single signal for "all done" from Warp
@@ -109,6 +112,10 @@ class MarsSimBridge(Node):
         self.create_timer(1.0 / HEAD_CAMERA_HZ, self._publish_head_camera)
         self.create_timer(1.0 / WRIST_CAMERA_HZ, self._publish_wrist_camera)
         self.create_timer(1.0 / DEPTH_HZ, self._publish_depth)
+        if self.env.pole:
+            # The pole isn't in the URDF robot_state_publisher serves, so draw it as a marker.
+            self._pole_pub = self.create_publisher(Marker, "/pole_marker", 1)
+            self.create_timer(1.0 / POLE_MARKER_HZ, self._publish_pole_marker)
 
     def destroy_node(self) -> None:
         if self._viewer is not None:
@@ -151,6 +158,19 @@ class MarsSimBridge(Node):
         self._odom_pub.publish(odom)
         transform = Transform(translation=Vector3(x=x, y=y, z=z), rotation=rotation)
         self._tf.sendTransform(TransformStamped(header=header, child_frame_id="base_link", transform=transform))
+
+    def _publish_pole_marker(self) -> None:
+        """The pole as a cylinder in base_link: the ball joint's quaternion is relative to it."""
+        qw, qx, qy, qz = self.state.joint("robot_pole").qpos
+        axis = np.array(
+            [2.0 * (qx * qz + qw * qy), 2.0 * (qy * qz - qw * qx), 1.0 - 2.0 * (qx * qx + qy * qy)]
+        )
+        centre = np.array([0.0, 0.0, POLE_PIVOT_Z]) + 0.5 * POLE_LENGTH * axis
+        marker = Marker(header=self._header("base_link"), ns="pole", id=0, type=Marker.CYLINDER, action=Marker.ADD)
+        marker.pose = Pose(position=Point(x=centre[0], y=centre[1], z=centre[2]), orientation=Quaternion(x=qx, y=qy, z=qz, w=qw))
+        marker.scale = Vector3(x=2.0 * POLE_RADIUS, y=2.0 * POLE_RADIUS, z=POLE_LENGTH)
+        marker.color = ColorRGBA(r=0.95, g=0.45, b=0.1, a=1.0)
+        self._pole_pub.publish(marker)
 
     def _publish_joint_states(self) -> None:
         positions = [float(self.state.sensor(f"{name}_pos").data[0]) for name in DRIVEN_JOINTS]

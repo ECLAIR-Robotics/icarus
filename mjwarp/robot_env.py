@@ -12,6 +12,8 @@ from mars_sim_driver.constants import (
     WRIST_CAMERA_FOVY,
 )
 
+from pole import add_pole, hide_pole_from_cameras
+
 ARM_JOINTS = ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6"]
 DRIVEN_JOINTS = [*ARM_JOINTS, "joint_head"]
 GRIPPER_JOINT = "joint6"
@@ -51,10 +53,13 @@ _SCENE_XML = """
 """
 
 
-def build_model() -> mujoco.MjModel:
+def build_model(pole: bool = False) -> mujoco.MjModel:
+    """The MARS robot in the arena. `pole=True` also mounts the unactuated balancing pole."""
     spec = mujoco.MjSpec.from_string(_SCENE_XML)
     robot_spec = world.load_robot_spec(world.default_urdf_path())
     world.add_planar_base(robot_spec)
+    if pole:
+        add_pole(robot_spec)
     world.tune_contacts(robot_spec)
     spec.attach(robot_spec, frame=spec.worldbody.add_frame(), prefix="robot_")
 
@@ -69,6 +74,8 @@ def build_model() -> mujoco.MjModel:
     model = spec.compile()
     world.style_robot_geoms(model)
     _hide_head_from_cameras(model)
+    if pole:
+        hide_pole_from_cameras(model, _CAMERA_HIDDEN_GROUP)
     _make_chassis_frictionless(model)
     _set_home_pose(model)
     _align_drive_with_com(model)
