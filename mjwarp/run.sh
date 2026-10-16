@@ -9,16 +9,18 @@
 # Ctrl+C stops the bridge node and tears down everything else this script started.
 
 usage() {
-    echo "Usage: $0 [-m] [-n ####]"
+    echo "Usage: $0 [-m] [-n ####] [-p]"
     echo "  -m          Run a manual control instance"
     echo "  -n ####     Run with N-world instances"
+    echo "  -p          Mount the balancing pole on the robot"
     exit 1
 }
 
 RUN_TYPE=""
 NUM_OF_INSTANCES=0
+WITH_POLE=false
 
-while getopts "mn:" flag; do 
+while getopts "mn:p" flag; do 
     case "${flag}" in 
         m)
             if [ -n "$RUN_TYPE" ]; then usage; fi
@@ -29,6 +31,9 @@ while getopts "mn:" flag; do
             if [ -n "$RUN_TYPE" ]; then usage; fi
             RUN_TYPE="AUTO"
             NUM_OF_INSTANCES=$OPTARG
+            ;;
+        p)
+            WITH_POLE=true
             ;;
         *)
             usage
@@ -55,6 +60,7 @@ if [ "$RUN_TYPE" = "AUTO" ]; then
     # step N worlds and let something else consume the data later.
     note "Starting $NUM_OF_INSTANCES worlds headlessly (no visualization, no control)..."
     cd "$MJWARP_DIR"
+    if [ "$WITH_POLE" = true ]; then exec python3 collect.py "$NUM_OF_INSTANCES" --pole; fi
     exec python3 collect.py "$NUM_OF_INSTANCES"
 fi
 
@@ -99,7 +105,7 @@ sleep 2
 
 note "Starting MJWarp bridge node (background)..."
 cd "$MJWARP_DIR"
-python3 ros_bridge.py &
+python3 ros_bridge.py --ros-args -p "pole:=$WITH_POLE" &
 pids+=("$!")
 sleep 2
 
