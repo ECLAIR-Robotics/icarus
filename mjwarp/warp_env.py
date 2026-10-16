@@ -5,27 +5,25 @@ import numpy as np
 from robot_env import build_model
 
 _RESET_TILT = 0.05
-_FALL_COST = 20.0
-_ALIVE_BONUS = 1.0
+# 5 steps of the 2 ms integrator: one 10 ms drive command.
+_N_SUBSTEPS = 5
+# Pole past this angle from vertical has fallen.
+_POLE_DONE = 0.5
 
-# obs: pole axis (3), pole angular velocity (3), x, y, vx, vy, drive xy
-_OBS_DIM = 12
-_ACTION_DIM = 2
+# obs: pole angular speed, angle from vertical
+_OBS_DIM = 2
 
 
 class MarsWarpEnv:
     """Batched cartpole. The action is the normalized drive force in x and y."""
 
-    def __init__(self, nworld: int) -> None:
+    def __init__(self, nworld: int, seed: int | None = None) -> None:
         self.mj_model = build_model()
         self.model = mjw.put_model(self.mj_model)
         self.data = mjw.make_data(self.mj_model, nworld=nworld)
         self.nworld = nworld
-        self._rng = np.random.default_rng()
-        self._x = _joint_addrs(self.mj_model, "robot_base_x")
-        self._y = _joint_addrs(self.mj_model, "robot_base_y")
+        self._rng = np.random.default_rng(seed)
         self._pole = _joint_addrs(self.mj_model, "robot_pole")
-        self._prev_action = np.zeros((nworld, _ACTION_DIM), dtype=np.float32)
         self.reset()
 
     def reset(self) -> np.ndarray:
@@ -36,8 +34,31 @@ class MarsWarpEnv:
         qvel[:] = 0.0
         self.data.qpos.assign(qpos)
         self.data.qvel.assign(qvel)
-        self._prev_action[:] = 0.0
-        return self._observe(qpos, qvel, self._prev_action)
+        return self._observe(qpos, qvel)
+
+    def step(self, action: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Hold one drive command for 10 ms. Returns obs, reward, and which worlds fell."""
+        ctrl = np.clip(np.asarray(action, dtype=np.float32), -1.0, 1.0)
+        if ctrl.shape != (self.nworld, 2):
+            raise ValueError(
+                f"action must have shape ({self.nworld}, 2), got {ctrl.shape}"
+            )
+        self.data.ctrl.assign(ctrl)
+        for _ in range(_N_SUBSTEPS):
+            mjw.step(self.model, self.data)
+        qpos = self.data.qpos.numpy()
+        qvel = self.data.qvel.numpy()
+        obs = self._observe(qpos, qvel)
+        done = obs[:, 1] > _POLE_DONE
+        reward = np.where(done, np.float32(0.0), np.float32(1.0))
+        if np.any(done):
+            qpos[done] = self.mj_model.qpos0
+            self._tilt_pole(qpos, done)
+            qvel[done] = 0.0
+            self.data.qpos.assign(qpos)
+            self.data.qvel.assign(qvel)
+            obs = self._observe(qpos, qvel)
+        return obs, reward, done
 
     def _tilt_pole(self, qpos: np.ndarray, mask: np.ndarray) -> None:
         idx = np.flatnonzero(mask)
@@ -50,16 +71,14 @@ class MarsWarpEnv:
         qpos[idx, qadr + 2] = np.sin(half) * np.sin(phi)
         qpos[idx, qadr + 3] = 0.0
 
-    def _observe(self, qpos: np.ndarray, qvel: np.ndarray, action: np.ndarray) -> np.ndarray:
-        obs = np.empty((self.nworld, _OBS_DIM), dtype=np.float32)
+    def _observe(self, qpos: np.ndarray, qvel: np.ndarray) -> np.ndarray:
         qadr, dadr = self._pole
-        obs[:, 0:3] = _pole_axis(qpos[:, qadr : qadr + 4])
-        obs[:, 3:6] = qvel[:, dadr : dadr + 3]
-        obs[:, 6] = qpos[:, self._x[0]]
-        obs[:, 7] = qpos[:, self._y[0]]
-        obs[:, 8] = qvel[:, self._x[1]]
-        obs[:, 9] = qvel[:, self._y[1]]
-        obs[:, 10:12] = action
+        axis = _pole_axis(qpos[:, qadr : qadr + 4])
+        # Ball joint has no single signed rate, so this is the speed of the pole.
+        rate = np.linalg.norm(qvel[:, dadr : dadr + 3], axis=1)
+        obs = np.empty((self.nworld, _OBS_DIM), dtype=np.float32)
+        obs[:, 0] = rate
+        obs[:, 1] = _tilt_angle(axis)
         return obs
 
 
@@ -83,22 +102,3 @@ def _pole_axis(quat: np.ndarray) -> np.ndarray:
 
 def _tilt_angle(axis: np.ndarray) -> np.ndarray:
     return np.arccos(np.clip(axis[:, 2], -1.0, 1.0))
-
-
-def _reward(
-    tilt: np.ndarray,
-    pole_rate: np.ndarray,
-    cart: np.ndarray,
-    action: np.ndarray,
-    prev_action: np.ndarray,
-    done: np.ndarray,
-) -> np.ndarray:
-    cost = (
-        4.0 * tilt**2
-        + 0.05 * np.sum(pole_rate**2, axis=1)
-        + 0.1 * np.sum(cart**2, axis=1)
-        + 0.01 * np.sum(action**2, axis=1)
-        + 0.05 * np.sum((action - prev_action) ** 2, axis=1)
-    )
-    bonus = np.where(done, -_FALL_COST, _ALIVE_BONUS)
-    return -cost + bonus
