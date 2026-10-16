@@ -1,7 +1,7 @@
 """The balancing pole: an unactuated rod on a ball joint above the robot's head, plus the
 numpy helpers for observing and scoring it. Upright is the unstable equilibrium; the base
-drive (see MarsWarpEnv.drive) is what's meant to keep it there. The controller/policy is
-not implemented yet."""
+drive (see MarsWarpEnv.drive) is what's meant to keep it there. policy.py is the learned
+controller's network; it consumes OBS_DIM observations and emits ACTION_DIM actions."""
 
 import mujoco
 import numpy as np
@@ -12,12 +12,16 @@ POLE_PIVOT_Z = 0.32
 POLE_LENGTH = 0.7
 POLE_RADIUS = 0.015
 
-RESET_TILT = 0.05
-_FALL_COST = 20.0
-_ALIVE_BONUS = 1.0
+_RESET_TILT = 0.05
+# 5 steps of the 2 ms integrator: one 10 ms drive command.
+N_SUBSTEPS = 5
+# Pole past this angle from vertical has fallen.
+_POLE_DONE = 0.5
 
-# obs: pole axis (3), pole angular velocity (3), x, y, vx, vy, drive command (forward, turn)
-OBS_DIM = 12
+# obs: pole angular speed, angle from vertical
+OBS_DIM = 2
+# action: normalized (forward, turn), scaled to the base's speed limits by MarsWarpEnv
+ACTION_DIM = 2
 
 
 def add_pole(robot_spec: mujoco.MjSpec) -> None:
@@ -50,7 +54,7 @@ def joint_addrs(model: mujoco.MjModel, name: str) -> tuple[int, int]:
 def tilt_pole(qpos: np.ndarray, qadr: int, rng: np.random.Generator, mask: np.ndarray) -> None:
     """Start the masked worlds' poles a random few degrees off vertical, in place."""
     idx = np.flatnonzero(mask)
-    tilt = rng.uniform(0.0, RESET_TILT, size=idx.size)
+    tilt = rng.uniform(0.0, _RESET_TILT, size=idx.size)
     phi = rng.uniform(0.0, 2.0 * np.pi, size=idx.size)
     half = 0.5 * tilt
     qpos[idx, qadr] = np.cos(half)
@@ -76,20 +80,17 @@ def tilt_angle(axis: np.ndarray) -> np.ndarray:
     return np.arccos(np.clip(axis[:, 2], -1.0, 1.0))
 
 
-def reward(
-    tilt: np.ndarray,
-    pole_rate: np.ndarray,
-    cart: np.ndarray,
-    action: np.ndarray,
-    prev_action: np.ndarray,
-    done: np.ndarray,
-) -> np.ndarray:
-    cost = (
-        4.0 * tilt**2
-        + 0.05 * np.sum(pole_rate**2, axis=1)
-        + 0.1 * np.sum(cart**2, axis=1)
-        + 0.01 * np.sum(action**2, axis=1)
-        + 0.05 * np.sum((action - prev_action) ** 2, axis=1)
-    )
-    bonus = np.where(done, -_FALL_COST, _ALIVE_BONUS)
-    return -cost + bonus
+def observe(qpos: np.ndarray, qvel: np.ndarray, qadr: int, dadr: int) -> np.ndarray:
+    axis = pole_axis(qpos[:, qadr : qadr + 4])
+    # Ball joint has no single signed rate, so this is the speed of the pole.
+    rate = np.linalg.norm(qvel[:, dadr : dadr + 3], axis=1)
+    obs = np.empty((qpos.shape[0], OBS_DIM), dtype=np.float32)
+    obs[:, 0] = rate
+    obs[:, 1] = tilt_angle(axis)
+    return obs
+
+
+def score(obs: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """(reward, done): 1 per step while the pole is up, 0 once it has fallen."""
+    done = obs[:, 1] > _POLE_DONE
+    return np.where(done, np.float32(0.0), np.float32(1.0)), done

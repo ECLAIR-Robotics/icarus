@@ -11,6 +11,7 @@ if not wp.is_cuda_available():
 
 import pole as pole_lib
 from robot_env import ARM_JOINTS, CAMERA_GEOM_GROUPS, HEAD_CAMERA, LIDAR_RAYS, WRIST_CAMERA, build_model
+from mars_sim_driver import world  # noqa: I001 -- needs robot_env's sys.path setup first
 
 
 CAMERAS = (HEAD_CAMERA, WRIST_CAMERA)
@@ -23,10 +24,16 @@ class MarsWarpEnv:
     worlds) or one value per world; each `step()` advances one control period.
 
     `pole=True` mounts an unactuated pole on the robot that the base drive is meant to
-    balance; see `pole_observation()`. Without it the robot is the plain loader/controller."""
+    balance; see `pole_step()`. `seed` makes its random starting tilts reproducible. Without
+    `pole` it is the plain loader/controller."""
 
     def __init__(
-        self, nworld: int = 1, control_hz: float = 50.0, cameras: bool = False, pole: bool = False
+        self,
+        nworld: int = 1,
+        control_hz: float = 50.0,
+        cameras: bool = False,
+        pole: bool = False,
+        seed: int | None = None,
     ) -> None:
         self.pole = pole
         self.mj_model = build_model(pole=pole)
@@ -45,11 +52,8 @@ class MarsWarpEnv:
         self.lidar_slice = slice(first_beam, first_beam + LIDAR_RAYS)
 
         if pole:
-            self._rng = np.random.default_rng()
+            self._rng = np.random.default_rng(seed)
             self._pole_qpos, self._pole_dof = pole_lib.joint_addrs(self.mj_model, "robot_pole")
-            self._base_x = pole_lib.joint_addrs(self.mj_model, "robot_base_x")
-            self._base_y = pole_lib.joint_addrs(self.mj_model, "robot_base_y")
-            self._prev_action = np.zeros((nworld, 2), dtype=np.float32)
 
         self._step_graph: wp.Graph | None = None
         self._snapshot = mujoco.MjData(self.mj_model)
@@ -78,30 +82,45 @@ class MarsWarpEnv:
             qpos = self.data.qpos.numpy()
             pole_lib.tilt_pole(qpos, self._pole_qpos, self._rng, np.ones(self.nworld, dtype=bool))
             self.data.qpos.assign(qpos)
-            self._prev_action[:] = 0.0
         mjw.forward(self.model, self.data)
 
-    def _drive_command(self) -> np.ndarray:
-        return self.ctrl[:, [self._forward_id, self._yaw_id]]
-
     def pole_observation(self) -> np.ndarray:
-        """(nworld, pole.OBS_DIM): pole axis, pole angular velocity, base x/y/vx/vy and the
-        current drive command. Reads device state back to the host."""
+        """(nworld, pole.OBS_DIM): pole angular speed and angle from vertical. Reads device
+        state back to the host."""
+        self._require_pole()
+        return pole_lib.observe(self.data.qpos.numpy(), self.data.qvel.numpy(), self._pole_qpos, self._pole_dof)
+
+    def pole_step(self, action: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Hold one normalized (forward, turn) command, shape (nworld, pole.ACTION_DIM), for
+        10 ms. Returns obs, reward, and which worlds fell; those worlds are reset in place."""
+        self._require_pole()
+        action = np.clip(np.asarray(action, dtype=np.float32), -1.0, 1.0)
+        if action.shape != (self.nworld, pole_lib.ACTION_DIM):
+            raise ValueError(f"action must have shape ({self.nworld}, {pole_lib.ACTION_DIM}), got {action.shape}")
+        self.drive(action[:, 0] * world.MAX_BASE_LINEAR_SPEED, action[:, 1] * world.MAX_BASE_ANGULAR_SPEED)
+        self.data.ctrl.assign(self.ctrl)
+        # The pole observation reads joint state, so skip the lidar and other sensors.
+        sensors_on = self.model.opt.disableflags
+        self.model.opt.disableflags = sensors_on | mjw.DisableBit.SENSOR
+        for _ in range(pole_lib.N_SUBSTEPS):
+            mjw.step(self.model, self.data)
+        self.model.opt.disableflags = sensors_on
+
+        qpos, qvel = self.data.qpos.numpy(), self.data.qvel.numpy()
+        obs = pole_lib.observe(qpos, qvel, self._pole_qpos, self._pole_dof)
+        reward, done = pole_lib.score(obs)
+        if np.any(done):
+            qpos[done] = self.mj_model.key("home").qpos
+            pole_lib.tilt_pole(qpos, self._pole_qpos, self._rng, done)
+            qvel[done] = 0.0
+            self.data.qpos.assign(qpos)
+            self.data.qvel.assign(qvel)
+            obs = pole_lib.observe(qpos, qvel, self._pole_qpos, self._pole_dof)
+        return obs, reward, done
+
+    def _require_pole(self) -> None:
         if not self.pole:
             raise RuntimeError("MarsWarpEnv was created with pole=False")
-        qpos, qvel = self.data.qpos.numpy(), self.data.qvel.numpy()
-        obs = np.empty((self.nworld, pole_lib.OBS_DIM), dtype=np.float32)
-        obs[:, 0:3] = pole_lib.pole_axis(qpos[:, self._pole_qpos : self._pole_qpos + 4])
-        obs[:, 3:6] = qvel[:, self._pole_dof : self._pole_dof + 3]
-        obs[:, 6] = qpos[:, self._base_x[0]]
-        obs[:, 7] = qpos[:, self._base_y[0]]
-        obs[:, 8] = qvel[:, self._base_x[1]]
-        obs[:, 9] = qvel[:, self._base_y[1]]
-        obs[:, 10:12] = self._drive_command()
-        return obs
-
-    # TODO: the balancing controller. Step the env with drive() from a policy/controller
-    # and score it with pole.reward(); the pole helpers are ready, the control law isn't.
 
     def drive(self, forward: float | np.ndarray, turn: float | np.ndarray) -> None:
         """Base velocity in m/s and rad/s, like /cmd_vel."""

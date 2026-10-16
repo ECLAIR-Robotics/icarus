@@ -8,6 +8,7 @@ dependencies = [
     "mujoco>=3.8.0",
     "mujoco-warp",
     "numpy",
+    "torch",
 ]
 
 [tool.uv]
