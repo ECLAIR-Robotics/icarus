@@ -56,7 +56,7 @@ def collect_rollout(
     for _ in range(config.rollout_steps):
         with torch.no_grad():
             action, raw_action, log_prob, value = policy.act(observation)
-        next_observation, reward, done = env.step(action.cpu().numpy())
+        next_observation, reward, done = env.pole_step(action.cpu().numpy())
         observations.append(observation)
         raw_actions.append(raw_action)
         log_probs.append(log_prob)
@@ -147,10 +147,10 @@ def train(config: PPOConfig, checkpoint: Path) -> None:
     torch.manual_seed(config.seed)
     np.random.seed(config.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    env = MarsWarpEnv(nworld=config.nworld, seed=config.seed)
+    env = MarsWarpEnv(nworld=config.nworld, pole=True, seed=config.seed)
     policy = CartPoleActorCritic().to(device)
     optimizer = torch.optim.Adam(policy.parameters(), lr=config.learning_rate)
-    observation = torch.as_tensor(env.reset(), dtype=torch.float32, device=device)
+    observation = torch.as_tensor(env.pole_observation(), dtype=torch.float32, device=device)
 
     for iteration in range(1, config.iterations + 1):
         rollout, observation = collect_rollout(env, policy, observation, config)

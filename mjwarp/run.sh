@@ -5,14 +5,22 @@
 # which only exist there, not on the bare host.
 #
 #   mjwarp/run.sh
+#   mjwarp/run.sh -t [--iterations N --nworld N --checkpoint PATH]   (see train_ppo.py --help)
 #
 # Ctrl+C stops the bridge node and tears down everything else this script started.
 
 usage() {
-    echo "Usage: $0 [-m] [-n ####] [-p]"
+    echo "Usage: $0 [-m] [-n ####] [-t [train_ppo options]] [-p]"
     echo "  -m          Run a manual control instance"
     echo "  -n ####     Run with N-world instances"
+    echo "  -t          Train the balancing policy with PPO (headless; implies the pole)"
     echo "  -p          Mount the balancing pole on the robot"
+    echo ""
+    echo "Options after -t are passed to train_ppo.py:"
+    echo "  --iterations N            PPO iterations (default 500)"
+    echo "  --nworld N                Parallel worlds (default 512)"
+    echo "  --checkpoint PATH         Checkpoint file (default checkpoints/cartpole_ppo.pt)"
+    echo "  Example: $0 -t --iterations 200 --nworld 256"
     exit 1
 }
 
@@ -20,7 +28,8 @@ RUN_TYPE=""
 NUM_OF_INSTANCES=0
 WITH_POLE=false
 
-while getopts "mn:p" flag; do 
+ARGS=("$@")
+while getopts "mn:tp" flag; do 
     case "${flag}" in 
         m)
             if [ -n "$RUN_TYPE" ]; then usage; fi
@@ -32,6 +41,11 @@ while getopts "mn:p" flag; do
             RUN_TYPE="AUTO"
             NUM_OF_INSTANCES=$OPTARG
             ;;
+        t)
+            if [ -n "$RUN_TYPE" ]; then usage; fi
+            RUN_TYPE="TRAIN"
+            WITH_POLE=true
+            ;;
         p)
             WITH_POLE=true
             ;;
@@ -40,6 +54,8 @@ while getopts "mn:p" flag; do
             ;;
     esac
 done
+
+shift $((OPTIND - 1))  # whatever is left is forwarded to train_ppo.py with -t
 
 if [ -z "$RUN_TYPE" ]; then
     usage
@@ -54,6 +70,13 @@ note() { printf '\033[1;34m==>\033[0m %s\n' "$*" >&2; }
 die() { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 
 [ -f "$URDF_PATH" ] || die "mars.urdf not found at $URDF_PATH"
+
+if [ "$RUN_TYPE" = "TRAIN" ]; then
+    # Headless like AUTO: PPO only needs the batched physics, not ROS or Foxglove.
+    note "Training the pole-balancing policy with PPO (checkpoints in mjwarp/checkpoints/)..."
+    cd "$MJWARP_DIR"
+    exec python3 train_ppo.py "$@"
+fi
 
 if [ "$RUN_TYPE" = "AUTO" ]; then
     # Pure headless physics: no ROS, no Foxglove, no router -- none of it is needed just to
