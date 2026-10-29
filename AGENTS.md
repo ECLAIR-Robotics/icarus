@@ -4,13 +4,14 @@ ECLAIR Robotics' ICARUS project: software for Innate's **MARS** robot (a small m
 base with an arm, running an NVIDIA Jetson Orin Nano 8GB). ICARUS is built **on top of**
 Innate OS, not as a fork of it.
 
-The project is at an early stage: the only code so far is a skeleton ROS 2 node.
+The project is at an early stage: a skeleton ROS 2 node, the MJWarp RL nav training (`mjwarp/`) and its robot side (the `RlNavigate` skill, and `rl_nav_node` with its web UI).
 
 ## Repository layout
 
 ```
-icarus/                  Python package: ROS 2 nodes (currently icarus_node.py, a stub)
-launch/icarus.launch.py  Launches icarus_node
+icarus/                  Python package: ROS 2 nodes (icarus_node.py, a stub; rl_nav_node.py, the RL nav policy + its web UI server)
+launch/                  icarus.launch.py (icarus_node), rl_nav.launch.py (rl_nav_node)
+web/rl_nav/              Static UI served by rl_nav_node: map, scan, click-to-goal (talks to rosbridge)
 resource/icarus          ament index marker (required by setup.py; keep it)
 package.xml, setup.py,   The repo root IS the `icarus` ament_python ROS 2 package
 setup.cfg
@@ -21,7 +22,11 @@ scripts/docker-shell.sh  Starts/joins the dev container (host)
 docker/Dockerfile        icarus-dev image, FROM Innate's sim dependency image
 docker/docker-compose.yml  Runs the dev container (+ attaches to a running sim)
 innate-os/               Git submodule: Innate's OS (third-party, pinned; see below)
+mjwarp/                  GPU-batched MuJoCo Warp sim + RL (nav policy); see mjwarp/TRAINING.md
+skills/                  Innate OS skill pack for the robot (RlNavigate runs the nav policy); see skills/README.md
 ```
+
+To train, evaluate, record or export the MJWarp RL policy, follow `mjwarp/TRAINING.md`.
 
 ## Stack
 

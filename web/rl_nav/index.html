@@ -1,0 +1,555 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>RL Nav</title>
+<link rel="icon" href="data:,">
+<!--
+  Served by icarus/rl_nav_node.py (http://<robot>:8080/). Talks to the robot's rosbridge (rws,
+  ws://<robot>:9090, the same socket the innate-os webapp uses); override with ?ws=ws://host:port.
+  Self-contained on purpose: no CDN, so it works on a robot with no internet.
+-->
+<style>
+:root {
+  --bg: #0a0a0c; --panel: #111114; --panel-2: #16161a;
+  --hairline: rgb(255 255 255 / 8%); --hairline-strong: rgb(255 255 255 / 16%);
+  --text: #e7e7ea; --muted: #8a8a93;
+  --accent: #e8a33d; --accent-faint: rgb(232 163 61 / 14%);
+  --ok: #56c28c; --danger: #d96a5a; --eval: #b58ce6; --teal: #5fb8a3;
+  --map-free: #1b1b20; --map-wall: #c9c9d1;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+  font: 14px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+body { display: grid; grid-template-columns: 1fr 340px; grid-template-rows: auto 1fr; height: 100dvh; }
+header { grid-column: 1 / -1; display: flex; align-items: center; gap: 12px; padding: 10px 16px;
+  border-bottom: 1px solid var(--hairline); min-width: 0; }
+header h1 { font-size: 15px; font-weight: 600; margin: 0; letter-spacing: .02em; white-space: nowrap; }
+header .sub { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--danger); flex: none; }
+.dot.on { background: var(--ok); } .dot.wait { background: var(--accent); }
+.spacer { flex: 1; }
+#stage { position: relative; min-width: 0; min-height: 0; overflow: hidden; touch-action: none; cursor: crosshair; }
+#map { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.overlay { position: absolute; display: flex; gap: 6px; }
+.overlay.tl { left: 12px; top: 12px; flex-direction: column; align-items: flex-start; }
+.overlay.br { right: 12px; bottom: 12px; }
+.chip { background: rgb(8 8 10 / 72%); border: 1px solid var(--hairline-strong); border-radius: 8px;
+  padding: 5px 9px; font-size: 12px; color: var(--muted); backdrop-filter: blur(6px); }
+.chip b { color: var(--text); font-weight: 600; }
+aside { border-left: 1px solid var(--hairline); background: var(--panel); overflow-y: auto; padding: 14px;
+  display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+section { display: flex; flex-direction: column; gap: 8px; }
+h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 0; font-weight: 600; }
+.pill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px;
+  font-size: 12px; font-weight: 600; border: 1px solid var(--hairline-strong); color: var(--muted); }
+.pill.driving { color: var(--accent); border-color: var(--accent); background: var(--accent-faint); }
+.pill.dry_run { color: var(--eval); border-color: var(--eval); }
+.pill.reached { color: var(--ok); border-color: var(--ok); }
+.pill.timeout, .pill.error, .pill.cancelled { color: var(--danger); border-color: var(--danger); }
+#message { color: var(--muted); font-size: 13px; min-height: 1.4em; }
+.stats { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.stat { background: var(--panel-2); border: 1px solid var(--hairline); border-radius: 8px; padding: 7px 9px; min-width: 0; }
+.stat .k { font-size: 11px; color: var(--muted); }
+.stat .v { font-size: 15px; font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.stat .v.warn { color: var(--danger); }
+.bar { display: grid; grid-template-columns: 64px 1fr 74px; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+.bar .track { position: relative; height: 8px; background: var(--panel-2); border: 1px solid var(--hairline); border-radius: 4px; overflow: hidden; }
+.bar .track::after { content: ""; position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background: var(--hairline-strong); }
+.bar .fill { position: absolute; top: 0; bottom: 0; background: var(--accent); }
+.bar .num { text-align: right; color: var(--text); font-variant-numeric: tabular-nums; }
+#policy { width: 100%; max-width: 360px; margin: 0 auto; aspect-ratio: 1; display: block; background: var(--panel-2); border: 1px solid var(--hairline); border-radius: 8px; }
+.row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+button { font: inherit; color: var(--text); background: var(--panel-2); border: 1px solid var(--hairline-strong);
+  border-radius: 8px; padding: 8px 12px; cursor: pointer; }
+button:hover:not(:disabled) { border-color: var(--muted); }
+button:disabled { opacity: .45; cursor: default; }
+button.primary { background: var(--accent); color: #1a1205; border-color: var(--accent); font-weight: 600; }
+button.stop { background: var(--danger); color: #fff; border-color: var(--danger); font-weight: 700; flex: 1; padding: 12px; font-size: 15px; }
+button.small { padding: 5px 9px; font-size: 12px; }
+#go { flex: 1; }
+label.toggle { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; cursor: pointer; user-select: none; }
+label.toggle input { accent-color: var(--eval); width: 16px; height: 16px; }
+#target { font-size: 13px; color: var(--muted); }
+#target b { color: var(--text); }
+#target .warn { color: var(--danger); }
+.hint { font-size: 12px; color: var(--muted); }
+kbd { font: 11px ui-monospace, monospace; border: 1px solid var(--hairline-strong); border-radius: 4px; padding: 0 4px; }
+.legend { display: flex; flex-wrap: wrap; gap: 10px; font-size: 11px; color: var(--muted); }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+@media (max-width: 760px) {
+  body { grid-template-columns: 1fr; grid-template-rows: auto 58dvh auto; height: auto; min-height: 100dvh; }
+  aside { border-left: 0; border-top: 1px solid var(--hairline); overflow: visible; }
+  header { padding: 10px 16px; }
+}
+</style>
+</head>
+<body>
+<header>
+  <span class="dot" id="conn"></span>
+  <h1>RL Nav</h1>
+  <span class="sub" id="connText">connecting…</span>
+  <span class="spacer"></span>
+  <span class="pill" id="state">—</span>
+</header>
+
+<div id="stage">
+  <canvas id="map"></canvas>
+  <div class="overlay tl">
+    <span class="chip">frame <b id="frame">—</b></span>
+    <span class="chip" id="noStatus" hidden>no status from the rl_nav node</span>
+  </div>
+  <div class="overlay br">
+    <button class="small" id="follow" aria-pressed="true">Following robot</button>
+    <button class="small" id="zoomIn" aria-label="Zoom in">+</button>
+    <button class="small" id="zoomOut" aria-label="Zoom out">−</button>
+  </div>
+</div>
+
+<aside>
+  <section>
+    <div class="row"><button class="stop" id="stop">Stop <kbd>Space</kbd></button></div>
+    <div id="target">Click the map to pick a goal.</div>
+    <div class="row">
+      <button class="primary" id="go" disabled>Drive to goal <kbd>Enter</kbd></button>
+    </div>
+    <label class="toggle"><input type="checkbox" id="dryRun"> Dry run (policy runs, base doesn't move)</label>
+    <div id="message"></div>
+  </section>
+
+  <section>
+    <h2>Run</h2>
+    <div class="stats">
+      <div class="stat"><div class="k">Remaining</div><div class="v" id="remaining">—</div></div>
+      <div class="stat"><div class="k">Time left</div><div class="v" id="timeLeft">—</div></div>
+      <div class="stat"><div class="k">Safety stops</div><div class="v" id="stops">—</div></div>
+      <div class="stat"><div class="k">Nearest return</div><div class="v" id="nearest">—</div></div>
+    </div>
+    <div class="bar"><span>forward</span><div class="track"><div class="fill" id="linBar"></div></div><span class="num" id="lin">—</span></div>
+    <div class="bar"><span>turn</span><div class="track"><div class="fill" id="angBar"></div></div><span class="num" id="ang">—</span></div>
+  </section>
+
+  <section>
+    <h2>What the policy sees</h2>
+    <canvas id="policy"></canvas>
+    <div class="legend">
+      <span><i style="background:var(--danger)"></i>&lt; 0.5 m</span>
+      <span><i style="background:var(--accent)"></i>&lt; 1.5 m</span>
+      <span><i style="background:var(--teal)"></i>farther</span>
+      <span><i style="background:var(--ok)"></i>goal</span>
+    </div>
+  </section>
+
+  <section>
+    <h2>System</h2>
+    <div class="stats">
+      <div class="stat"><div class="k">Policy</div><div class="v" id="backend">—</div></div>
+      <div class="stat"><div class="k">Step time</div><div class="v" id="stepUs">—</div></div>
+      <div class="stat"><div class="k">Scan age</div><div class="v" id="scanAge">—</div></div>
+      <div class="stat"><div class="k">Odom age</div><div class="v" id="odomAge">—</div></div>
+    </div>
+    <div class="hint">Drag to pan, scroll or +/− to zoom. Teleop overrides the policy (the cmd_vel mux gives it priority). Goals beyond the max distance are refused.</div>
+  </section>
+</aside>
+
+<script type="module">
+// ---- rosbridge ------------------------------------------------------------------------------
+class Ros {
+  constructor(url, onState) {
+    this.url = url; this.onState = onState;
+    this.subs = new Map(); this.adverts = new Map(); this.calls = new Map(); this.n = 0;
+    this.connect();
+  }
+  connect() {
+    const ws = (this.ws = new WebSocket(this.url));
+    this.onState("connecting");
+    ws.onopen = () => {
+      this.onState("connected");
+      for (const [topic, sub] of this.subs) this.#subscribe(topic, sub);
+      for (const [topic, type] of this.adverts) this.send({ op: "advertise", topic, type });
+    };
+    ws.onclose = () => {
+      this.onState("disconnected");
+      for (const call of this.calls.values()) { clearTimeout(call.timer); call.reject(new Error("rosbridge disconnected")); }
+      this.calls.clear();
+      setTimeout(() => this.connect(), 1500);
+    };
+    ws.onerror = () => ws.close();
+    ws.onmessage = (event) => {
+      let msg;
+      try { msg = JSON.parse(event.data); } catch { return; }
+      if (msg.op === "publish") this.subs.get(msg.topic)?.handler(msg.msg);
+      else if (msg.op === "service_response") {
+        const call = this.calls.get(msg.id);
+        if (!call) return;
+        this.calls.delete(msg.id); clearTimeout(call.timer);
+        msg.result === false ? call.reject(new Error(JSON.stringify(msg.values))) : call.resolve(msg.values);
+      }
+    };
+  }
+  get connected() { return this.ws?.readyState === WebSocket.OPEN; }
+  send(obj) { if (this.connected) this.ws.send(JSON.stringify(obj)); return this.connected; }
+  subscribe(topic, type, handler, throttleMs = 0) {
+    const sub = { type, handler, throttleMs };
+    this.subs.set(topic, sub);
+    this.#subscribe(topic, sub);
+  }
+  #subscribe(topic, sub) {
+    this.send({ op: "subscribe", topic, type: sub.type, ...(sub.throttleMs ? { throttle_rate: sub.throttleMs } : {}) });
+  }
+  advertise(topic, type) { this.adverts.set(topic, type); this.send({ op: "advertise", topic, type }); }
+  publish(topic, msg) { return this.send({ op: "publish", topic, msg }); }
+  call(service, type, args, timeoutMs = 5000) {
+    return new Promise((resolve, reject) => {
+      if (!this.connected) { reject(new Error("rosbridge not connected")); return; }
+      const id = `call_${this.n++}`;
+      const timer = setTimeout(() => { this.calls.delete(id); reject(new Error(`${service} timed out`)); }, timeoutMs);
+      this.calls.set(id, { resolve, reject, timer });
+      this.send({ op: "call_service", id, service, type, args });
+    });
+  }
+}
+
+// ---- state ----------------------------------------------------------------------------------
+const $ = (id) => document.getElementById(id);
+const cfg = Object.assign(
+  { rosbridge_port: 9090, node: "/rl_nav", goal_topic: "/icarus/rl_nav/goal", cancel_topic: "/icarus/rl_nav/cancel",
+    status_topic: "/icarus/rl_nav/status", map_topic: "/map" },
+  await fetch("config.json").then((r) => (r.ok ? r.json() : {})).catch(() => ({})),
+);
+const wsUrl = new URLSearchParams(location.search).get("ws") || `ws://${location.hostname || "localhost"}:${cfg.rosbridge_port}`;
+
+let status = null, statusAt = 0;
+let grid = null; // {canvas, frame, res, ox, oy, yaw, w, h}
+let pending = null; // [x, y] goal picked on the map, in status.frame
+let trail = [], trailFrame = null;
+const view = { cx: 0, cy: 0, scale: 60, follow: true }; // scale: px per metre
+const ROBOT_RADIUS = 0.2, ROBOT_CENTER_OFFSET = -0.0587; // mjwarp/nav_env.py footprint
+
+const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+const C = { free: css("--map-free"), wall: css("--map-wall"), accent: css("--accent"), ok: css("--ok"), danger: css("--danger"),
+  teal: css("--teal"), eval: css("--eval"), muted: css("--muted"), text: css("--text") };
+
+const ros = new Ros(wsUrl, (state) => {
+  $("conn").className = "dot" + (state === "connected" ? " on" : state === "connecting" ? " wait" : "");
+  $("connText").textContent = `${state === "connected" ? "connected to" : state === "connecting" ? "connecting to" : "lost"} ${wsUrl}`;
+  if (state === "connected") ros.advertise(cfg.cancel_topic, "std_msgs/msg/Bool");
+});
+ros.advertise(cfg.goal_topic, "geometry_msgs/msg/PoseStamped");
+ros.advertise(cfg.cancel_topic, "std_msgs/msg/Bool");
+ros.subscribe(cfg.status_topic, "std_msgs/msg/String", (msg) => {
+  try { status = JSON.parse(msg.data); } catch { return; }
+  statusAt = performance.now();
+  onStatus();
+});
+ros.subscribe(cfg.map_topic, "nav_msgs/msg/OccupancyGrid", onMap, 1000);
+
+// ---- map ------------------------------------------------------------------------------------
+function onMap(msg) {
+  const { width: w, height: h, resolution: res, origin } = msg.info ?? {};
+  let data = msg.data;
+  if (typeof data === "string") data = Int8Array.from(atob(data), (c) => (c.charCodeAt(0) << 24) >> 24);
+  if (!w || !h || !data || data.length < w * h) return;
+  const canvas = grid?.w === w && grid?.h === h ? grid.canvas : document.createElement("canvas");
+  canvas.width = w; canvas.height = h;
+  const ctx = canvas.getContext("2d");
+  const img = ctx.createImageData(w, h);
+  const free = hex(C.free), wall = hex(C.wall);
+  for (let row = 0; row < h; row++) {
+    const src = (h - 1 - row) * w; // flip: canvas top = highest y
+    for (let col = 0; col < w; col++) {
+      const v = data[src + col], di = (row * w + col) * 4;
+      if (v < 0) continue; // unknown: transparent
+      const t = Math.min(100, v) / 100;
+      img.data[di] = free[0] + (wall[0] - free[0]) * t;
+      img.data[di + 1] = free[1] + (wall[1] - free[1]) * t;
+      img.data[di + 2] = free[2] + (wall[2] - free[2]) * t;
+      img.data[di + 3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  const q = origin?.orientation ?? { x: 0, y: 0, z: 0, w: 1 };
+  grid = { canvas, w, h, res, ox: origin?.position?.x ?? 0, oy: origin?.position?.y ?? 0,
+    yaw: Math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z)), frame: msg.header?.frame_id || "map" };
+}
+function hex(color) {
+  const m = color.match(/^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i);
+  return m ? [1, 2, 3].map((i) => parseInt(m[i], 16)) : [128, 128, 128];
+}
+
+// ---- status -> panel ------------------------------------------------------------------------
+const fmt = (v, digits, unit) => (v == null ? "—" : `${v.toFixed(digits)}${unit}`);
+function onStatus() {
+  const s = status;
+  $("state").textContent = s.state.replace("_", " ");
+  $("state").className = `pill ${s.state}`;
+  $("frame").textContent = s.frame;
+  $("message").textContent = s.message || "";
+  $("remaining").textContent = fmt(s.remaining, 2, " m");
+  $("timeLeft").textContent = fmt(s.time_left, 0, " s");
+  $("stops").textContent = s.safety_stops ?? "—";
+  const nearest = s.bins ? Math.min(...s.bins) * s.lidar_max_range : null;
+  $("nearest").textContent = nearest == null ? "—" : nearest >= s.lidar_max_range ? `> ${s.lidar_max_range} m` : `${nearest.toFixed(2)} m`;
+  $("nearest").classList.toggle("warn", nearest != null && nearest < 0.35);
+  $("backend").textContent = s.backend;
+  $("stepUs").textContent = s.step_us ? `${s.step_us.toFixed(0)} µs` : "—";
+  $("scanAge").textContent = fmt(s.scan_age, 2, " s");
+  $("scanAge").classList.toggle("warn", s.scan_age == null || s.scan_age > 0.6);
+  $("odomAge").textContent = fmt(s.odom_age, 2, " s");
+  $("odomAge").classList.toggle("warn", s.odom_age == null || s.odom_age > 0.3);
+  if (document.activeElement !== $("dryRun") && !dryRunBusy) $("dryRun").checked = !!s.dry_run;
+  const active = s.state === "driving" || s.state === "dry_run";
+  const cmd = active && s.cmd ? s.cmd : [0, 0];
+  setBar("lin", cmd[0], 0.4, " m/s", s.blocked);
+  setBar("ang", cmd[1], 1.0, " rad/s", false);
+
+  if (s.frame !== trailFrame) { trail = []; trailFrame = s.frame; pending = null; }
+  if (s.robot) {
+    const last = trail[trail.length - 1];
+    if (!last || Math.hypot(last[0] - s.robot[0], last[1] - s.robot[1]) > 0.04) trail.push([s.robot[0], s.robot[1]]);
+    if (trail.length > 3000) trail.splice(0, trail.length - 3000);
+    if (view.follow) { view.cx = s.robot[0]; view.cy = s.robot[1]; }
+  }
+  updateTarget();
+  drawPolicy();
+}
+function setBar(id, value, max, unit, warn) {
+  const f = Math.max(-1, Math.min(1, value / max));
+  const bar = $(id + "Bar");
+  bar.style.left = `${50 + Math.min(0, f) * 50}%`;
+  bar.style.width = `${Math.abs(f) * 50}%`;
+  bar.style.background = warn ? C.danger : C.accent;
+  $(id).textContent = `${value.toFixed(2)}${unit}`;
+}
+function updateTarget() {
+  const s = status;
+  if (!pending) {
+    $("target").textContent = "Click the map to pick a goal.";
+    $("go").disabled = true;
+    return;
+  }
+  const d = s?.robot ? Math.hypot(pending[0] - s.robot[0], pending[1] - s.robot[1]) : null;
+  const tooFar = d != null && s && d > s.max_goal_distance;
+  $("target").innerHTML = `Goal <b>(${pending[0].toFixed(2)}, ${pending[1].toFixed(2)})</b> in ${s?.frame ?? "?"}` +
+    (d == null ? "" : `, <b>${d.toFixed(2)} m</b> away`) +
+    (tooFar ? ` <span class="warn">— over the ${s.max_goal_distance} m limit</span>` : "");
+  $("go").disabled = !s || !ros.connected || tooFar;
+}
+
+// ---- commands -------------------------------------------------------------------------------
+function sendGoal() {
+  if (!pending || !status || $("go").disabled) return;
+  ros.publish(cfg.goal_topic, {
+    header: { frame_id: status.frame, stamp: { sec: 0, nanosec: 0 } },
+    pose: { position: { x: pending[0], y: pending[1], z: 0 }, orientation: { x: 0, y: 0, z: 0, w: 1 } },
+  });
+}
+function stop() { ros.publish(cfg.cancel_topic, { data: true }); }
+let dryRunBusy = false;
+async function setDryRun(on) {
+  dryRunBusy = true;
+  try {
+    const res = await ros.call(`${cfg.node}/set_parameters`, "rcl_interfaces/srv/SetParameters",
+      { parameters: [{ name: "dry_run", value: { type: 1, bool_value: on } }] });
+    if (res?.results?.[0]?.successful === false) throw new Error(res.results[0].reason);
+  } catch (err) {
+    $("dryRun").checked = !on;
+    $("message").textContent = `Couldn't set dry run: ${err.message}`;
+  } finally { dryRunBusy = false; }
+}
+$("go").onclick = sendGoal;
+$("stop").onclick = stop;
+$("dryRun").onchange = (e) => setDryRun(e.target.checked);
+addEventListener("keydown", (e) => {
+  if (e.target instanceof HTMLInputElement) return;
+  if (e.code === "Space" || e.code === "Escape") { e.preventDefault(); stop(); }
+  else if (e.code === "Enter") { e.preventDefault(); sendGoal(); }
+});
+
+// ---- map view -------------------------------------------------------------------------------
+const canvas = $("map"), ctx = canvas.getContext("2d");
+const stage = $("stage");
+function toScreen(x, y) { return [canvas.clientWidth / 2 + (x - view.cx) * view.scale, canvas.clientHeight / 2 - (y - view.cy) * view.scale]; }
+function toWorld(px, py) { return [view.cx + (px - canvas.clientWidth / 2) / view.scale, view.cy - (py - canvas.clientHeight / 2) / view.scale]; }
+function setFollow(on) {
+  view.follow = on;
+  $("follow").setAttribute("aria-pressed", on);
+  $("follow").textContent = on ? "Following robot" : "Follow robot";
+  if (on && status?.robot) { view.cx = status.robot[0]; view.cy = status.robot[1]; }
+}
+$("follow").onclick = () => setFollow(!view.follow);
+$("zoomIn").onclick = () => (view.scale = Math.min(400, view.scale * 1.25));
+$("zoomOut").onclick = () => (view.scale = Math.max(8, view.scale / 1.25));
+stage.addEventListener("wheel", (e) => {
+  e.preventDefault();
+  const rect = canvas.getBoundingClientRect();
+  const before = toWorld(e.clientX - rect.left, e.clientY - rect.top);
+  view.scale = Math.max(8, Math.min(400, view.scale * Math.exp(-e.deltaY * 0.0015)));
+  if (!view.follow) {
+    const after = toWorld(e.clientX - rect.left, e.clientY - rect.top);
+    view.cx += before[0] - after[0]; view.cy += before[1] - after[1];
+  }
+}, { passive: false });
+let drag = null;
+stage.addEventListener("pointerdown", (e) => {
+  if (e.target.closest("button")) return;
+  stage.setPointerCapture(e.pointerId);
+  drag = { x: e.clientX, y: e.clientY, cx: view.cx, cy: view.cy, moved: false };
+});
+stage.addEventListener("pointermove", (e) => {
+  if (!drag) return;
+  const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+  if (!drag.moved && Math.hypot(dx, dy) < 6) return;
+  if (!drag.moved) setFollow(false);
+  drag.moved = true;
+  view.cx = drag.cx - dx / view.scale; view.cy = drag.cy + dy / view.scale;
+});
+stage.addEventListener("pointerup", (e) => {
+  if (drag && !drag.moved && status) {
+    const rect = canvas.getBoundingClientRect();
+    pending = toWorld(e.clientX - rect.left, e.clientY - rect.top);
+    updateTarget();
+  }
+  drag = null;
+});
+
+function resize(c) {
+  const dpr = devicePixelRatio || 1, w = c.clientWidth, h = c.clientHeight;
+  if (c.width !== Math.round(w * dpr) || c.height !== Math.round(h * dpr)) { c.width = Math.round(w * dpr); c.height = Math.round(h * dpr); }
+  return dpr;
+}
+
+function draw() {
+  const dpr = resize(canvas), W = canvas.clientWidth, H = canvas.clientHeight, s = status;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = css("--bg"); ctx.fillRect(0, 0, W, H);
+  $("noStatus").hidden = performance.now() - statusAt < 2000;
+
+  if (grid && s && grid.frame === s.frame) {
+    const [sx, sy] = toScreen(grid.ox, grid.oy);
+    ctx.save();
+    ctx.imageSmoothingEnabled = false;
+    ctx.translate(sx, sy); ctx.scale(view.scale, -view.scale); ctx.rotate(grid.yaw); ctx.scale(grid.res, -grid.res);
+    ctx.drawImage(grid.canvas, 0, -grid.h);
+    ctx.restore();
+  }
+  drawGridLines(W, H);
+  if (!s) { requestAnimationFrame(draw); return; }
+
+  // Trail.
+  if (trail.length > 1) {
+    ctx.beginPath();
+    trail.forEach(([x, y], i) => { const [px, py] = toScreen(x, y); i ? ctx.lineTo(px, py) : ctx.moveTo(px, py); });
+    ctx.strokeStyle = "rgb(232 163 61 / 35%)"; ctx.lineWidth = 2; ctx.stroke();
+  }
+  // What the policy sees: its lidar bins, as wedges around the laser.
+  if (s.bins && s.laser) {
+    const [lx, ly] = toScreen(s.laser[0], s.laser[1]), n = s.bins.length, width = (2 * Math.PI) / n;
+    s.bins.forEach((b, i) => {
+      if (b >= 0.999) return;
+      const r = b * s.lidar_max_range, a0 = s.laser[2] - Math.PI + i * width;
+      ctx.beginPath(); ctx.moveTo(lx, ly);
+      ctx.arc(lx, ly, r * view.scale, -(a0 + width), -a0);
+      ctx.closePath();
+      ctx.fillStyle = binColor(r, 0.13); ctx.fill();
+    });
+  }
+  // Raw scan.
+  if (s.scan) {
+    ctx.fillStyle = C.danger;
+    for (let i = 0; i < s.scan.length; i += 2) {
+      const [px, py] = toScreen(s.scan[i], s.scan[i + 1]);
+      ctx.fillRect(px - 1.5, py - 1.5, 3, 3);
+    }
+  }
+  // Goal-range ring.
+  if (s.robot) {
+    const [rx, ry] = toScreen(s.robot[0], s.robot[1]);
+    ctx.setLineDash([4, 6]); ctx.strokeStyle = "rgb(255 255 255 / 10%)"; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.arc(rx, ry, s.max_goal_distance * view.scale, 0, 2 * Math.PI); ctx.stroke();
+    ctx.setLineDash([]);
+  }
+  // Active goal and pending pick.
+  if (s.goal) drawGoal(s.goal, C.ok, s.goal_radius, true);
+  if (pending) drawGoal(pending, C.accent, s.goal_radius, false);
+  if (s.robot) drawRobot(s.robot);
+  requestAnimationFrame(draw);
+}
+
+function drawGridLines(W, H) {
+  const step = view.scale > 30 ? 1 : view.scale > 12 ? 2 : 5;
+  const [x0, y1] = toWorld(0, 0), [x1, y0] = toWorld(W, H);
+  ctx.strokeStyle = "rgb(255 255 255 / 4%)"; ctx.lineWidth = 1; ctx.beginPath();
+  for (let x = Math.ceil(x0 / step) * step; x <= x1; x += step) { const [px] = toScreen(x, 0); ctx.moveTo(Math.round(px) + 0.5, 0); ctx.lineTo(Math.round(px) + 0.5, H); }
+  for (let y = Math.ceil(y0 / step) * step; y <= y1; y += step) { const [, py] = toScreen(0, y); ctx.moveTo(0, Math.round(py) + 0.5); ctx.lineTo(W, Math.round(py) + 0.5); }
+  ctx.stroke();
+}
+function drawGoal([x, y], color, radius, active) {
+  const [px, py] = toScreen(x, y);
+  if (status?.robot && active) {
+    const [rx, ry] = toScreen(status.robot[0], status.robot[1]);
+    ctx.setLineDash([2, 5]); ctx.strokeStyle = color; ctx.globalAlpha = 0.6; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(rx, ry); ctx.lineTo(px, py); ctx.stroke();
+    ctx.setLineDash([]); ctx.globalAlpha = 1;
+  }
+  ctx.beginPath(); ctx.arc(px, py, Math.max(4, radius * view.scale), 0, 2 * Math.PI);
+  ctx.fillStyle = active ? "rgb(86 194 140 / 18%)" : "rgb(232 163 61 / 14%)"; ctx.fill();
+  ctx.strokeStyle = color; ctx.lineWidth = 2;
+  if (!active) ctx.setLineDash([5, 4]);
+  ctx.stroke(); ctx.setLineDash([]);
+  ctx.beginPath(); ctx.arc(px, py, 3, 0, 2 * Math.PI); ctx.fillStyle = color; ctx.fill();
+}
+function drawRobot([x, y, yaw]) {
+  const c = Math.cos(yaw), sn = Math.sin(yaw);
+  const [cx, cy] = toScreen(x + ROBOT_CENTER_OFFSET * c, y + ROBOT_CENTER_OFFSET * sn);
+  const r = Math.max(6, ROBOT_RADIUS * view.scale);
+  ctx.beginPath(); ctx.arc(cx, cy, r, 0, 2 * Math.PI);
+  ctx.fillStyle = "rgb(231 231 234 / 14%)"; ctx.fill();
+  ctx.strokeStyle = C.text; ctx.lineWidth = 2; ctx.stroke();
+  const [hx, hy] = toScreen(x + 0.28 * c, y + 0.28 * sn), [bx, by] = toScreen(x, y);
+  ctx.beginPath(); ctx.moveTo(bx, by); ctx.lineTo(hx, hy); ctx.strokeStyle = C.accent; ctx.lineWidth = 3; ctx.stroke();
+}
+function binColor(range, alpha) {
+  const rgb = range < 0.5 ? "217 106 90" : range < 1.5 ? "232 163 61" : "95 184 163";
+  return `rgb(${rgb} / ${alpha * 100}%)`;
+}
+
+// Robot-centred polar view of the 40 bins, forward up.
+function drawPolicy() {
+  const c = $("policy"), dpr = resize(c), g = c.getContext("2d"), s = status, size = c.clientWidth;
+  g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, size, size);
+  if (!s?.bins) return;
+  const mid = size / 2, k = (size / 2 - 10) / s.lidar_max_range, n = s.bins.length, width = (2 * Math.PI) / n;
+  // screen angle of a body-frame angle a (CCW, 0 = forward) with forward pointing up
+  const sa = (a) => -Math.PI / 2 - a;
+  g.strokeStyle = "rgb(255 255 255 / 7%)"; g.lineWidth = 1; g.fillStyle = C.muted; g.font = "10px system-ui";
+  for (let m = 1; m <= s.lidar_max_range; m++) { g.beginPath(); g.arc(mid, mid, m * k, 0, 2 * Math.PI); g.stroke(); g.fillText(`${m} m`, mid + 3, mid - m * k + 11); }
+  s.bins.forEach((b, i) => {
+    const r = b * s.lidar_max_range, a0 = -Math.PI + i * width;
+    g.beginPath(); g.moveTo(mid, mid); g.arc(mid, mid, r * k, sa(a0 + width), sa(a0)); g.closePath();
+    g.fillStyle = binColor(r, b >= 0.999 ? 0.06 : 0.55); g.fill();
+  });
+  if (s.goal && s.robot) {
+    const dx = s.goal[0] - s.robot[0], dy = s.goal[1] - s.robot[1];
+    const bxg = Math.cos(s.robot[2]) * dx + Math.sin(s.robot[2]) * dy, byg = -Math.sin(s.robot[2]) * dx + Math.cos(s.robot[2]) * dy;
+    const a = Math.atan2(byg, bxg), r = Math.min(Math.hypot(bxg, byg), s.lidar_max_range) * k;
+    g.strokeStyle = C.ok; g.lineWidth = 2; g.beginPath(); g.moveTo(mid, mid); g.lineTo(mid + r * Math.cos(sa(a)), mid + r * Math.sin(sa(a))); g.stroke();
+    g.beginPath(); g.arc(mid + r * Math.cos(sa(a)), mid + r * Math.sin(sa(a)), 4, 0, 2 * Math.PI); g.fillStyle = C.ok; g.fill();
+  }
+  if (s.cmd && (s.state === "driving" || s.state === "dry_run")) {
+    // Commanded motion: where the base would be in 1 s.
+    const v = s.cmd[0], w = s.cmd[1];
+    g.strokeStyle = s.blocked ? C.danger : C.accent; g.lineWidth = 2; g.beginPath(); g.moveTo(mid, mid);
+    let x = 0, y = 0, th = 0;
+    for (let i = 0; i < 10; i++) { th += w * 0.1; x += v * 0.1 * Math.cos(th); y += v * 0.1 * Math.sin(th); g.lineTo(mid - y * k, mid - x * k); }
+    g.stroke();
+  }
+  g.beginPath(); g.arc(mid, mid, ROBOT_RADIUS * k, 0, 2 * Math.PI); g.strokeStyle = C.text; g.lineWidth = 1.5; g.stroke();
+}
+
+new ResizeObserver(() => drawPolicy()).observe($("policy"));
+requestAnimationFrame(draw);
+</script>
+</body>
+</html>

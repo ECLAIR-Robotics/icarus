@@ -14,6 +14,10 @@ setup(
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
         (os.path.join('share', package_name, 'launch'), glob('launch/*.py')),
+        # rl_nav_node runs the skill pack's policy runner and policy files, and serves web/rl_nav.
+        (os.path.join('share', package_name, 'rl_nav'), ['skills/rl_nav_utils.py']),
+        (os.path.join('share', package_name, 'rl_nav', 'rl_nav_policy'), glob('skills/rl_nav_policy/*')),
+        (os.path.join('share', package_name, 'rl_nav', 'web'), glob('web/rl_nav/*')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -25,6 +29,7 @@ setup(
     entry_points={
         'console_scripts': [
             'icarus_node = icarus.icarus_node:main',
+            'rl_nav_node = icarus.rl_nav_node:main',
         ],
     },
 )

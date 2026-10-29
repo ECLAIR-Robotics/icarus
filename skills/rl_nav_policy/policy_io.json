@@ -1,0 +1,62 @@
+{
+  "control_hz": 10.0,
+  "max_forward_speed": 0.4,
+  "max_turn_rate": 1.0,
+  "goal_radius": 0.3,
+  "goal_obs_scale": 5.0,
+  "action_history": 3,
+  "lidar": {
+    "bins": 40,
+    "min_range": 0.2,
+    "max_range": 4.0,
+    "frame": "base_laser (same axes as base_link)",
+    "binning": "beam angle a (rad, CCW, 0 = forward) wrapped to [-pi, pi) goes to bin floor((a + pi) / (2 pi / bins)); each bin is the min valid range; returns that are non-finite, outside [range_min, range_max] of the scan or below min_range count as max_range; then clip to max_range and divide by it"
+  },
+  "observation": [
+    [
+      "lidar",
+      40,
+      "binned scan, 0-1"
+    ],
+    [
+      "goal_body_xy",
+      2,
+      "goal in base frame (x fwd, y left) from odometry, m / goal_obs_scale"
+    ],
+    [
+      "goal_distance",
+      1,
+      "m / goal_obs_scale"
+    ],
+    [
+      "goal_heading_cos_sin",
+      2,
+      "cos, sin of atan2(goal_y, goal_x)"
+    ],
+    [
+      "forward_velocity",
+      1,
+      "odom linear.x / max_forward_speed"
+    ],
+    [
+      "yaw_rate",
+      1,
+      "odom angular.z / max_turn_rate"
+    ],
+    [
+      "action_history",
+      6,
+      "last clamped actions, newest first, (fwd, turn) pairs"
+    ]
+  ],
+  "action": [
+    [
+      "forward",
+      "clamp to [-1, 1], times max_forward_speed -> cmd_vel.linear.x"
+    ],
+    [
+      "turn",
+      "clamp to [-1, 1], times max_turn_rate -> cmd_vel.angular.z"
+    ]
+  ]
+}

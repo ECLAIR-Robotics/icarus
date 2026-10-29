@@ -13,3 +13,6 @@ docker/.env
 
 # uv environments
 .venv/
+
+# mjwarp training output
+mjwarp/logs/

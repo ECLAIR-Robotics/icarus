@@ -51,8 +51,9 @@ _SCENE_XML = """
 """
 
 
-def build_model() -> mujoco.MjModel:
-    spec = mujoco.MjSpec.from_string(_SCENE_XML)
+def build_model(scene_xml: str = _SCENE_XML) -> mujoco.MjModel:
+    """`scene_xml` is the world the robot is attached to; it must set the same <option> as _SCENE_XML."""
+    spec = mujoco.MjSpec.from_string(scene_xml)
     robot_spec = world.load_robot_spec(world.default_urdf_path())
     world.add_planar_base(robot_spec)
     world.tune_contacts(robot_spec)

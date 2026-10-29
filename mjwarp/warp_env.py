@@ -21,10 +21,18 @@ class MarsWarpEnv:
     """`nworld` MARS robots simulated in parallel on the GPU. Commands take a scalar (all
     worlds) or one value per world; each `step()` advances one control period."""
 
-    def __init__(self, nworld: int = 1, control_hz: float = 50.0, cameras: bool = False) -> None:
-        self.mj_model = build_model()
+    def __init__(
+        self,
+        nworld: int = 1,
+        control_hz: float = 50.0,
+        cameras: bool = False,
+        mj_model: mujoco.MjModel | None = None,
+        nconmax: int | None = None,
+        njmax: int | None = None,
+    ) -> None:
+        self.mj_model = mj_model if mj_model is not None else build_model()
         self.model = mjw.put_model(self.mj_model)
-        self.data = mjw.make_data(self.mj_model, nworld=nworld)
+        self.data = mjw.make_data(self.mj_model, nworld=nworld, nconmax=nconmax, njmax=njmax)
         self.nworld = nworld
         self.control_period = 1.0 / control_hz
         self.substeps = round(self.control_period / self.mj_model.opt.timestep)
@@ -76,6 +84,11 @@ class MarsWarpEnv:
 
     def step(self) -> None:
         self.data.ctrl.assign(self.ctrl)
+        self.step_physics()
+
+    def step_physics(self) -> None:
+        """One control period with whatever `data.ctrl` already holds, for callers that write
+        it on the GPU instead of through `self.ctrl`."""
         if self._step_graph is None:
             self._step_graph = self._capture_control_step()
         wp.capture_launch(self._step_graph)
