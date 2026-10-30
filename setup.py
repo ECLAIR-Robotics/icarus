@@ -18,6 +18,9 @@ setup(
         (os.path.join('share', package_name, 'rl_nav'), ['skills/rl_nav_utils.py']),
         (os.path.join('share', package_name, 'rl_nav', 'rl_nav_policy'), glob('skills/rl_nav_policy/*')),
         (os.path.join('share', package_name, 'rl_nav', 'web'), glob('web/rl_nav/*')),
+        # rl_nav_unsafe_node's legacy export (untracked; nothing is installed when it's absent).
+        (os.path.join('share', package_name, 'rl_nav', 'legacy_policy'),
+            glob('mjwarp/nav/exported/policy.onnx*') + glob('mjwarp/nav/exported/policy_io.json')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -30,6 +33,7 @@ setup(
         'console_scripts': [
             'icarus_node = icarus.icarus_node:main',
             'rl_nav_node = icarus.rl_nav_node:main',
+            'rl_nav_unsafe_node = icarus.rl_nav_unsafe_node:main',
         ],
     },
 )
