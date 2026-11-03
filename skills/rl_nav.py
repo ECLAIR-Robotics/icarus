@@ -51,6 +51,8 @@ class RlNavigate(Skill):
         if math.hypot(forward_m, left_m) > MAX_GOAL_DISTANCE:
             self.fail(f"Goal is {math.hypot(forward_m, left_m):.1f} m away; the policy handles up to {MAX_GOAL_DISTANCE} m")
         spec = self._spec
+        if spec.camera is not None:
+            self.fail("This policy needs the stereo camera, which skills can't read; run it with icarus/rl_nav_node.py instead")
         try:
             controller = NavController(spec, self._policy)
         except ValueError as e:

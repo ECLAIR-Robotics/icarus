@@ -12,7 +12,7 @@ The robot was given `mjwarp/nav/exported/` from an old run. The node can't use i
 
 | | What the node needs | What the robot got |
 |---|---|---|
-| Observations | 53 (40 lidar, 5 goal, 2 velocity, 3 x 2 past actions) | 49 (1 past action) |
+| Observations | 69 (40 lidar, 5 goal, 2 velocity, 3 x 2 past actions, 16 stereo camera) | 49 (1 past action) |
 | Action scale | 0.4 m/s, 1.0 rad/s | 0.6 m/s, 2.5 rad/s |
 | `policy_io.json` | `nav_env.deploy_spec()` format (has `lidar`, `max_forward_speed`, ...) | an older format |
 | Files | `policy.onnx` (weights inlined), `policy.npz`, `policy_io.json` | `policy.onnx` + `policy.onnx.data` + `policy.pt`, no `.npz` |
@@ -25,8 +25,10 @@ It is most likely the first, noise-free run (`logs/nav/2026-10-26_18-56-05`), wh
 
 1. **Don't change the robot interface.** Leave these as they are in `mjwarp/nav_env.py`:
    `CONTROL_HZ`, `MAX_FORWARD_SPEED` (0.4), `MAX_TURN_RATE` (1.0), `LIDAR_BINS` (40),
-   `ACTION_HISTORY` (3), the lidar ranges, the observation scalings, and `deploy_spec()`. The
-   robot's speed limits are set to match them. If you think one of them must change, stop and ask.
+   `ACTION_HISTORY` (3), the lidar ranges, the `CAMERA_*` binning constants (16 bins, 112 deg,
+   0.25-2 m depth, 4 cm + 2 cm/m to 40 cm height), the observation scalings, and `deploy_spec()`.
+   The robot's speed limits and `icarus/rl_nav_node.py`'s camera binning are set to match them.
+   If you think one of them must change, stop and ask.
 2. Don't edit `innate-os/` (read-only submodule), `skills/rl_nav_utils.py`, `skills/rl_nav.py`
    or `icarus/rl_nav_node.py`. If `verify_deploy.py` reports a mismatch, report it and stop. Don't
    "fix" the robot code to match.
@@ -44,9 +46,9 @@ All commands run from `mjwarp/` unless noted.
       If it does, someone has local changes to the trainer: stop and ask whether to keep them.
 - [ ] 0.3 The contract matches what the robot expects:
       ```bash
-      grep -nE "^(CONTROL_HZ|MAX_FORWARD_SPEED|MAX_TURN_RATE|LIDAR_BINS|ACTION_HISTORY) =" nav_env.py
+      grep -nE "^(CONTROL_HZ|MAX_FORWARD_SPEED|MAX_TURN_RATE|LIDAR_BINS|ACTION_HISTORY|CAMERA_BINS) =" nav_env.py
       ```
-      Expect `MAX_FORWARD_SPEED = 0.4`, `MAX_TURN_RATE = 1.0`, `LIDAR_BINS = 40`, `ACTION_HISTORY = 3`.
+      Expect `MAX_FORWARD_SPEED = 0.4`, `MAX_TURN_RATE = 1.0`, `LIDAR_BINS = 40`, `ACTION_HISTORY = 3`, `CAMERA_BINS = 16`.
 - [ ] 0.4 Node checks from `TRAINING.md` section 1: inside a Slurm job (not a login node), GPUs
       visible, enough hours left (~3 h for 3000 iterations on 2 GPUs), and `pgrep -af train.py`
       shows no other run on these GPUs.
@@ -94,21 +96,23 @@ Use the last checkpoint: `CKPT=$(ls logs/nav/<run>/model_*.pt | sort -t_ -k3 -n 
       import json, onnx, numpy as np
       d = "../skills/rl_nav_policy/"
       s = json.load(open(d + "policy_io.json"))
-      size = s["lidar"]["bins"] + 5 + 2 + 2 * s["action_history"]
-      print("speeds", s["max_forward_speed"], s["max_turn_rate"], "action_history", s["action_history"], "obs", size)
+      size = s["lidar"]["bins"] + 5 + 2 + 2 * s["action_history"] + s["camera"]["bins"]
+      print("speeds", s["max_forward_speed"], s["max_turn_rate"], "action_history", s["action_history"], "camera", s["camera"]["bins"], s["camera"]["topic"], "obs", size)
       m = onnx.load(d + "policy.onnx")
       print("onnx input", [x.dim_value for x in m.graph.input[0].type.tensor_type.shape.dim])
       print("npz obs_mean", np.load(d + "policy.npz")["obs_mean"].shape)
       EOF
       ```
-      Pass: `speeds 0.4 1.0 action_history 3 obs 53`, ONNX input `[1, 53]`, npz `(53,)`, and
-      `onnx.load` works with no `.data` file next to it.
+      Pass: `speeds 0.4 1.0 action_history 3 camera 16 /mars/main_camera/points obs 69`, ONNX input
+      `[1, 69]`, npz `(69,)`, and `onnx.load` works with no `.data` file next to it.
 - [ ] 2.4 Check the robot-side code against the trainer:
       ```bash
       python verify_deploy.py --checkpoint "$CKPT" --episodes 8
       ```
-      Pass: every `max diff` line <= 1e-4 (policies ~0 after the clamp, observation ~1e-7), no
-      `MISMATCH`, and at least 7 of 8 episodes print "Reached the goal". Record the per-episode lines.
+      Pass: every `max diff` line <= 1e-4 (policies ~0 after the clamp, lidar and camera binning
+      (clean and noisy) ~0, observation ~1e-7), no `MISMATCH`, and at least 7 of 8 episodes print
+      "Reached the goal". Record the per-episode lines (they include low-obstacle counts and how
+      often the robot reversed).
 - [ ] 2.5 Optional video for the operator: `python play.py --checkpoint "$CKPT" --num-envs 9 --seconds 30`.
       Record the path of the `.mp4`.
 - [ ] 2.6 `md5sum ../skills/rl_nav_policy/*` and record the output. The robot checklist's

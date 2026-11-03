@@ -1,8 +1,10 @@
 """Runs the MJWarp-trained RL nav policy on the robot as a ROS 2 node, and serves its web UI.
 
 Inputs:  /scan (sensor_msgs/LaserScan), /odom (nav_msgs/Odometry), TF (goal frame -> odom,
-         base_link -> laser), and goals on /icarus/rl_nav/goal (geometry_msgs/PoseStamped, in
-         `map` or `odom`; orientation is ignored, the policy only drives to a point).
+         base_link -> laser, base_link -> camera), and goals on /icarus/rl_nav/goal
+         (geometry_msgs/PoseStamped, in `map` or `odom`; orientation is ignored, the policy only
+         drives to a point). Policies trained with the stereo camera also read its point cloud
+         (/mars/main_camera/points, sensor_msgs/PointCloud2), binned as policy_io.json says.
 Output:  geometry_msgs/Twist on /cmd_vel_skills, the skills input of innate-os's cmd_vel mux,
          so teleop still overrides it. Nothing is published while there is no goal.
 Control: std_msgs/Bool true on /icarus/rl_nav/cancel stops the run (std_msgs/Empty can't be
@@ -37,7 +39,7 @@ from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from rclpy.time import Time
-from sensor_msgs.msg import LaserScan
+from sensor_msgs.msg import LaserScan, PointCloud2
 from std_msgs.msg import Bool, String
 from tf2_ros import Buffer, TransformException, TransformListener
 
@@ -48,6 +50,8 @@ STATUS_TOPIC = "/icarus/rl_nav/status"
 FEED_TIMEOUT_S = 3.0
 TF_TIMEOUT_S = 1.0
 STATUS_SCAN_POINTS = 720
+# The stereo cloud is 320 x 240 points at <= 8 Hz; binning a subsample this size is plenty.
+CAMERA_MAX_POINTS = 20000
 
 Pose2 = tuple[float, float, float]
 
@@ -91,6 +95,15 @@ class _Scan:
     stamp: float
     frame_id: str
     received: float
+
+
+@dataclass
+class _Camera:
+    bins: np.ndarray
+    stamp: float
+    received: float
+    pitch_deg: float
+    """The optical axis's pitch below horizontal in base_link; the policy trained with ~0."""
 
 
 @dataclass
@@ -165,6 +178,7 @@ class RlNavNode(Node):
             safety_sector=math.radians(p("safety_sector_deg", 60.0).value),
             stale_scan_s=p("stale_scan_s", 0.6).value,
             stale_odom_s=p("stale_odom_s", 0.3).value,
+            stale_camera_s=p("stale_camera_s", 1.0).value,
         )
 
         self._tf = Buffer()
@@ -177,11 +191,15 @@ class RlNavNode(Node):
         self._remaining: float | None = None
         self._step_us = 0.0
         self._laser_in_base: dict[str, Pose2] = {}
+        self._camera: _Camera | None = None
 
         self._cmd_pub = self.create_publisher(Twist, self._cmd_vel_topic, 10)
         self._status_pub = self.create_publisher(String, STATUS_TOPIC, 10)
         self.create_subscription(LaserScan, scan_topic, self._on_scan, qos_profile_sensor_data)
         self.create_subscription(Odometry, odom_topic, self._on_odom, 10)
+        if self._spec.camera is not None:
+            camera_topic = p("camera_topic", self._spec.camera.topic).value
+            self.create_subscription(PointCloud2, camera_topic, self._on_cloud, qos_profile_sensor_data)
         self.create_subscription(PoseStamped, GOAL_TOPIC, self._on_goal, 10)
         self.create_subscription(Bool, CANCEL_TOPIC, self._on_cancel, 10)
         self.create_timer(1.0 / self._spec.control_hz, self._tick)
@@ -198,7 +216,8 @@ class RlNavNode(Node):
         self._http = ThreadingHTTPServer(("0.0.0.0", http_port), partial(_UiHandler, directory=str(share / "web")))
         threading.Thread(target=self._http.serve_forever, daemon=True).start()
         self.get_logger().info(
-            f"RL nav ready: {self._controller.policy.backend} policy from {policy_dir}, driving {self._cmd_vel_topic}; "
+            f"RL nav ready: {self._controller.policy.backend} policy from {policy_dir}"
+            f"{' (lidar + stereo camera)' if self._spec.camera else ' (lidar)'}, driving {self._cmd_vel_topic}; "
             f"UI on http://<robot>:{http_port}/"
         )
 
@@ -214,6 +233,27 @@ class RlNavNode(Node):
         pose = msg.pose.pose
         self._odom = _Odom(
             (pose.position.x, pose.position.y, _yaw(pose.orientation)), _stamp(msg.header.stamp), msg.header.frame_id or "odom", time.monotonic()
+        )
+
+    def _on_cloud(self, msg: PointCloud2) -> None:
+        """Stereo points -> base_link (through TF at the cloud's stamp, so head tilt is accounted
+        for) -> the policy's camera bins."""
+        rotation, translation = self._transform_3d(self._base_frame, msg.header.frame_id, _stamp(msg.header.stamp))
+        if rotation is None:
+            self.get_logger().warn(f"No transform {self._base_frame} <- {msg.header.frame_id}; skipping camera frames", throttle_duration_sec=5.0)
+            return
+        offsets = {f.name: f.offset for f in msg.fields}
+        layout = np.dtype({"names": ["x", "y", "z"], "formats": [np.float32] * 3, "offsets": [offsets["x"], offsets["y"], offsets["z"]], "itemsize": msg.point_step})
+        cloud = np.frombuffer(msg.data, dtype=layout, count=msg.width * msg.height)[:: max(1, msg.width * msg.height // CAMERA_MAX_POINTS)]
+        optical = np.stack((cloud["x"], cloud["y"], cloud["z"]), axis=1)
+        optical = optical[np.isfinite(optical).all(axis=1)]
+        points = optical @ rotation.T + translation
+        axis = rotation[:, 2]  # the optical axis in base_link
+        self._camera = _Camera(
+            self._u.bin_camera(self._spec.camera, points, optical[:, 2]),
+            _stamp(msg.header.stamp),
+            time.monotonic(),
+            math.degrees(math.asin(-max(-1.0, min(1.0, float(axis[2]))))),
         )
 
     def _on_goal(self, msg: PoseStamped) -> None:
@@ -268,7 +308,10 @@ class RlNavNode(Node):
             return
 
         start = time.perf_counter()
-        cmd = self._controller.step(goal_body, odom.pose, odom.stamp, scan, now)
+        camera = self._camera
+        cmd = self._controller.step(
+            goal_body, odom.pose, odom.stamp, scan, now, camera.bins if camera else None, camera.stamp if camera else None
+        )
         self._step_us = 0.9 * self._step_us + 0.1 * (time.perf_counter() - start) * 1e6 if self._step_us else (time.perf_counter() - start) * 1e6
         self._last_cmd = cmd
         self._send(cmd.linear, cmd.angular)
@@ -303,6 +346,26 @@ class RlNavNode(Node):
                 continue
             return (t.translation.x, t.translation.y, _yaw(t.rotation))
         return None
+
+    def _transform_3d(self, target: str, source: str, stamp: float) -> tuple[np.ndarray | None, np.ndarray | None]:
+        """Rotation matrix and translation taking points from `source` to `target`, at `stamp` if TF
+        has it, else the latest."""
+        for at in (Time(nanoseconds=int(stamp * 1e9)), Time()):
+            try:
+                t = self._tf.lookup_transform(target, source, at).transform
+            except TransformException:
+                continue
+            x, y, z, w = t.rotation.x, t.rotation.y, t.rotation.z, t.rotation.w
+            rotation = np.array(
+                [
+                    [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+                    [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+                    [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+                ],
+                dtype=np.float32,
+            )
+            return rotation, np.array([t.translation.x, t.translation.y, t.translation.z], dtype=np.float32)
+        return None, None
 
     def _goal_in(self, frame: str, run: _Run) -> Pose2 | None:
         t = self._transform(frame, run.frame)
@@ -340,6 +403,7 @@ class RlNavNode(Node):
             "lidar_max_range": self._spec.lidar_max_range,
             "safety_stops": self._controller.safety_stops if run else (self._result or {}).get("safety_stops", 0),
             "scan_age": round(now - scan.received, 2) if scan else None,
+            "camera": None,
             "odom_age": round(now - odom.received, 2) if odom else None,
         }
         robot = None
@@ -357,6 +421,15 @@ class RlNavNode(Node):
             status.update(
                 cmd=[round(cmd.linear, 3), round(cmd.angular, 3)], action=[round(float(a), 3) for a in cmd.action], blocked=cmd.blocked, stale=cmd.stale
             )
+        camera, camera_spec = self._camera, self._spec.camera
+        if camera_spec is not None:
+            status["camera"] = {
+                "hfov": camera_spec.hfov,
+                "max_range": camera_spec.max_range,
+                "bins": [round(float(b), 3) for b in camera.bins] if camera else None,
+                "age": round(now - camera.received, 2) if camera else None,
+                "pitch_deg": round(camera.pitch_deg, 1) if camera else None,
+            }
         if scan is not None:
             bins = self._u.bin_scan(self._spec, scan.ranges, scan.angle_min, scan.angle_increment, scan.range_min, scan.range_max)
             status["bins"] = [round(float(b), 3) for b in bins]

@@ -13,6 +13,12 @@ What the policy does not get to see cleanly (each parameter is drawn per episode
 - The goal and velocity come from simulated wheel odometry: scale error, random-walk drift,
   blind to sideways slip, and noisy velocity estimates.
 - Random pushes perturb the base.
+- The head's stereo camera sees what the lidar can't: low obstacles (6-14 cm, under the lidar's
+  17 cm plane) are scattered in many rooms. A fan of rays from the camera, intersected analytically
+  with the floor and the (box and cylinder) obstacles, stands in for the stereo point cloud
+  (/mars/main_camera/points), with its 0.25-2 m depth clamp, holes, range-squared noise, a slow
+  frame rate and a pitch error. The camera only looks forward, and reversing is
+  penalized.
 
 The critic gets the clean state plus these hidden parameters (asymmetric actor-critic).
 Rewards and terminations use the true state.
@@ -28,6 +34,7 @@ import math
 
 import mujoco
 import mujoco_warp as mjw
+import numpy as np
 import torch
 import warp as wp
 from rsl_rl.env import VecEnv
@@ -50,6 +57,18 @@ GOAL_OBS_SCALE = 5.0
 ACTION_HISTORY = 3
 GOAL_RADIUS = 0.3
 EPISODE_SECONDS = 45.0
+# Stereo camera (mars_cam stereo_depth_estimator: depth clamped to 0.25-2 m, <= 8 Hz). Its points,
+# in base_link, between CAMERA_MIN/MAX_HEIGHT above the floor are obstacles; they are min-pooled by
+# bearing into CAMERA_BINS sectors across CAMERA_HFOV, as horizontal range from base_link / max.
+CAMERA_BINS = 16
+CAMERA_HFOV = math.radians(112.0)  # the lens sees ~116 deg; the outer columns are unreliable
+CAMERA_MIN_DEPTH = 0.25
+CAMERA_MAX_DEPTH = 2.0
+# The floor-rejection height grows with range: a 1 deg head pitch error lifts the floor by ~1.7 cm/m.
+CAMERA_MIN_HEIGHT = 0.04
+CAMERA_MIN_HEIGHT_PER_M = 0.02
+CAMERA_MAX_HEIGHT = 0.40  # the robot (head included) is ~0.36 m tall; higher things are overhead
+CAMERA_MAX_RANGE = 2.0
 
 # World.
 ROOM_HALF_RANGE = (2.0, 4.0)  # per axis, so rooms are 4-8 m rectangles
@@ -60,6 +79,11 @@ OBSTACLE_HEIGHT = 0.5
 CYLINDER_RADII = (0.08, 0.12, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5)
 BOX_HALF_SIZES = ((0.05, 0.3), (0.05, 0.6), (0.15, 0.15), (0.25, 0.25), (0.2, 0.4), (0.3, 0.6), (0.4, 0.4), (0.1, 1.0))
 OBSTACLE_DENSITY_RANGE = (0.1, 0.7)  # per-episode probability that each obstacle is in the room
+# Below the lidar's plane: only the camera sees these (shoes, books, toys, cable trays).
+LOW_BOX_SIZES = ((0.10, 0.06, 0.06), (0.15, 0.10, 0.08), (0.20, 0.05, 0.10), (0.08, 0.08, 0.12), (0.25, 0.15, 0.07), (0.12, 0.30, 0.14))  # half x, half y, height
+LOW_CYLINDER_SIZES = ((0.06, 0.10), (0.10, 0.07), (0.15, 0.12))  # radius, height
+LOW_OBSTACLE_EPISODE_PROB = 0.7  # rooms that have any
+LOW_OBSTACLE_DENSITY_RANGE = (0.2, 0.7)
 # Unused walls and obstacles are parked out here, beyond the lidar's max range.
 PARK_X = 30.0
 OVERVIEW_CAMERA = "overview"
@@ -93,6 +117,17 @@ LIDAR_DROPOUT_RANGE = (0.0, 0.1)
 LIDAR_SPURIOUS_PROB = 0.002
 LIDAR_YAW_OFFSET_STD_DEG = 2.0
 
+# Stereo camera noise.
+CAMERA_PERIOD_RANGE = (0.125, 0.25)  # 4-8 Hz
+CAMERA_DROPOUT_RANGE = (0.0, 0.4)  # holes: textureless surfaces, speckle and edge filters
+CAMERA_NOISE_K_RANGE = (0.005, 0.02)  # depth std = k * depth^2 (m)
+CAMERA_SPURIOUS_PROB = 0.0005  # the real pipeline's speckle filter drops most isolated matches
+CAMERA_PITCH_STD_DEG = 1.0  # head calibration / tilt error
+# The ray fan (sim only; the robot uses every point). Denser near the horizon, where the floor
+# is far and a low obstacle spans few degrees.
+CAMERA_RAY_AZIMUTHS_DEG = tuple(float(a) for a in range(-56, 57, 4))
+CAMERA_RAY_ELEVATIONS_DEG = (-40, -35, -30, -26, -22, -19, -16, -14, -12, -10, -8, -6, -4, -2, 1, 5)
+
 # Wheel odometry.
 ODOM_SCALE_RANGE = ((0.95, 1.05), (0.95, 1.05))  # distance, yaw
 ODOM_STEP_NOISE = (0.002, 0.003)  # m, rad per control step (random walk)
@@ -117,13 +152,46 @@ REWARD_TIME = -0.01
 REWARD_PROXIMITY = -0.1
 PROXIMITY_MARGIN = 0.2
 REWARD_ACTION_RATE = -0.01
+# Per step, times the reverse speed as a fraction of the max: the camera only looks forward.
+REWARD_REVERSE = -0.25
 
 N_WALLS = 4
 WALL_HALF_SIZES = ((WALL_HALF_LENGTH, WALL_HALF_THICKNESS),) * 2 + ((WALL_HALF_THICKNESS, WALL_HALF_LENGTH),) * 2
+N_TALL = len(CYLINDER_RADII) + len(BOX_HALF_SIZES)
+N_LOW = len(LOW_BOX_SIZES) + len(LOW_CYLINDER_SIZES)
 # Obstacles as rounded rectangles: half extents plus a corner radius (a cylinder is all radius).
-SHAPE_HALF = WALL_HALF_SIZES + ((0.0, 0.0),) * len(CYLINDER_RADII) + BOX_HALF_SIZES
-SHAPE_ROUND = (0.0,) * N_WALLS + CYLINDER_RADII + (0.0,) * len(BOX_HALF_SIZES)
+SHAPE_HALF = (
+    WALL_HALF_SIZES
+    + ((0.0, 0.0),) * len(CYLINDER_RADII)
+    + BOX_HALF_SIZES
+    + tuple((hx, hy) for hx, hy, _ in LOW_BOX_SIZES)
+    + ((0.0, 0.0),) * len(LOW_CYLINDER_SIZES)
+)
+SHAPE_ROUND = (
+    (0.0,) * N_WALLS
+    + CYLINDER_RADII
+    + (0.0,) * len(BOX_HALF_SIZES)
+    + (0.0,) * len(LOW_BOX_SIZES)
+    + tuple(r for r, _ in LOW_CYLINDER_SIZES)
+)
 N_SHAPES = len(SHAPE_HALF)
+SHAPE_HEIGHT = (
+    (1.0,) * N_WALLS
+    + (OBSTACLE_HEIGHT,) * N_TALL
+    + tuple(z for _, _, z in LOW_BOX_SIZES)
+    + tuple(z for _, z in LOW_CYLINDER_SIZES)
+)
+
+
+def _camera_ray_angles() -> tuple[list[float], list[float]]:
+    """(azimuth, elevation) of every ray in radians, row-major over elevations."""
+    az, el = [], []
+    for e in CAMERA_RAY_ELEVATIONS_DEG:
+        for a in CAMERA_RAY_AZIMUTHS_DEG:
+            az.append(math.radians(a))
+            el.append(math.radians(e))
+    return az, el
+
 
 
 def deploy_spec() -> dict:
@@ -145,6 +213,23 @@ def deploy_spec() -> dict:
             "non-finite, outside [range_min, range_max] of the scan or below min_range count as "
             "max_range; then clip to max_range and divide by it",
         },
+        "camera": {
+            "bins": CAMERA_BINS,
+            "hfov": CAMERA_HFOV,
+            "min_depth": CAMERA_MIN_DEPTH,
+            "max_depth": CAMERA_MAX_DEPTH,
+            "min_height": CAMERA_MIN_HEIGHT,
+            "min_height_per_m": CAMERA_MIN_HEIGHT_PER_M,
+            "max_height": CAMERA_MAX_HEIGHT,
+            "max_range": CAMERA_MAX_RANGE,
+            "topic": "/mars/main_camera/points",
+            "binning": "points (camera_optical_frame) with optical-axis depth z in [min_depth, max_depth] "
+            "are moved to base_link; with bearing b = atan2(y, x) and range r = hypot(x, y) (both from "
+            "base_link's origin), those with height z in [min_height + min_height_per_m * r, max_height] "
+            "are obstacles; points "
+            "with |b| < hfov/2 go to bin floor((b + hfov/2) / (hfov / bins)), each bin is the min r; "
+            "empty bins are max_range; then clip to max_range and divide by it",
+        },
         "observation": [
             ["lidar", LIDAR_BINS, "binned scan, 0-1"],
             ["goal_body_xy", 2, "goal in base frame (x fwd, y left) from odometry, m / goal_obs_scale"],
@@ -153,6 +238,7 @@ def deploy_spec() -> dict:
             ["forward_velocity", 1, "odom linear.x / max_forward_speed"],
             ["yaw_rate", 1, "odom angular.z / max_turn_rate"],
             ["action_history", 2 * ACTION_HISTORY, "last clamped actions, newest first, (fwd, turn) pairs"],
+            ["camera", CAMERA_BINS, "binned stereo obstacle points, 0-1, bin 0 = rightmost"],
         ],
         "action": [
             ["forward", "clamp to [-1, 1], times max_forward_speed -> cmd_vel.linear.x"],
@@ -178,7 +264,15 @@ def _scene_xml() -> str:
         mocap_body(f"box_{i}", f'<geom type="box" size="{hx} {hy} {h}" rgba="0.35 0.45 0.65 1"/>', h)
         for i, (hx, hy) in enumerate(BOX_HALF_SIZES)
     ]
-    bodies = "\n        ".join(walls + cylinders + boxes)
+    low_boxes = [
+        mocap_body(f"low_box_{i}", f'<geom type="box" size="{hx} {hy} {z / 2}" rgba="0.75 0.3 0.55 1"/>', z / 2)
+        for i, (hx, hy, z) in enumerate(LOW_BOX_SIZES)
+    ]
+    low_cylinders = [
+        mocap_body(f"low_cylinder_{i}", f'<geom type="cylinder" size="{r} {z / 2}" rgba="0.75 0.3 0.55 1"/>', z / 2)
+        for i, (r, z) in enumerate(LOW_CYLINDER_SIZES)
+    ]
+    bodies = "\n        ".join(walls + cylinders + boxes + low_boxes + low_cylinders)
     return f"""
 <mujoco model="mars_nav_arena">
     <option timestep="{PHYSICS_DT}" gravity="0 0 -9.81" integrator="implicitfast" cone="elliptic" impratio="10"/>
@@ -200,11 +294,34 @@ def _scene_xml() -> str:
 """
 
 
+def _camera_self_occlusion(m: mujoco.MjModel, azimuths: list[float], elevations: list[float]) -> tuple[list[float], list[bool]]:
+    """The head camera's position in base_link at the home pose, and which rays the robot's own
+    body (chassis, arm) blocks within CAMERA_MIN_DEPTH; those never return a valid point, on the
+    robot either. Rays start a few cm out: the optical centre sits inside the head housing."""
+    data = mujoco.MjData(m)
+    mujoco.mj_resetDataKeyframe(m, data, m.key("home").id)
+    mujoco.mj_forward(m, data)
+    base = m.body("robot_base_link").id
+    rot, origin = data.xmat[base].reshape(3, 3), data.xpos[base]
+    camera = data.xpos[m.body("robot_camera_optical_frame").id]
+    robot_bodies = {i for i in range(m.nbody) if m.body(i).name.startswith("robot_")}
+    start_offset = 0.05
+    geom = np.zeros(1, dtype=np.int32)
+    blocked = []
+    for a, e in zip(azimuths, elevations):
+        direction = rot @ np.array([math.cos(e) * math.cos(a), math.cos(e) * math.sin(a), math.sin(e)])
+        dist = mujoco.mj_ray(m, data, camera + start_offset * direction, direction, None, 1, m.body("robot_camera_optical_frame").id, geom)
+        blocked.append(bool(dist >= 0 and geom[0] >= 0 and m.geom_bodyid[geom[0]] in robot_bodies and dist + start_offset < 1.0))
+    return (rot.T @ (camera - origin)).tolist(), blocked
+
+
 def _shape_names() -> list[str]:
     return (
         [f"wall_{i}" for i in range(N_WALLS)]
         + [f"cylinder_{i}" for i in range(len(CYLINDER_RADII))]
         + [f"box_{i}" for i in range(len(BOX_HALF_SIZES))]
+        + [f"low_box_{i}" for i in range(len(LOW_BOX_SIZES))]
+        + [f"low_cylinder_{i}" for i in range(len(LOW_CYLINDER_SIZES))]
     )
 
 
@@ -254,6 +371,18 @@ class MarsNavEnv(VecEnv):
         self._park_xy = torch.tensor([[PARK_X + 2.5 * i, 0.0] for i in range(N_SHAPES)], device=dev)
         self._max_cmd = torch.tensor([MAX_FORWARD_SPEED, MAX_TURN_RATE], device=dev)
         self._beam_index = torch.arange(LIDAR_BEAMS, device=dev)
+        az, el = _camera_ray_angles()
+        self._ray_az = torch.tensor(az, device=dev)
+        self._ray_el = torch.tensor(el, device=dev)
+        # The head holds its home pose, where the camera looks level: ray angles are base-frame angles.
+        self._ray_dir = torch.stack((self._ray_el.cos() * self._ray_az.cos(), self._ray_el.cos() * self._ray_az.sin(), self._ray_el.sin()), dim=1)
+        # Optical-axis depth per metre along each ray, for the depth clamp.
+        self._ray_depth_per_m = self._ray_el.cos() * self._ray_az.cos()
+        camera_pos, blocked = _camera_self_occlusion(m, az, el)
+        self._camera_pos = torch.tensor(camera_pos, dtype=torch.float32, device=dev)
+        self._ray_blocked = torch.tensor(blocked, device=dev)
+        self._shape_height = torch.tensor(SHAPE_HEIGHT, device=dev)
+        self._shape_is_cylinder = self._shape_half.abs().sum(dim=1) == 0
 
     def _init_views(self) -> None:
         data = self.sim.data
@@ -280,6 +409,8 @@ class MarsNavEnv(VecEnv):
         self.meas_vel = zeros(2)
         self.scan_age = zeros()
         self.scan_obs = torch.ones(n, LIDAR_BINS, device=dev)
+        self.camera_age = zeros()
+        self.camera_obs = torch.ones(n, CAMERA_BINS, device=dev)
         # Per-episode hidden parameters.
         self.latency = zeros()
         self.motor_gain = zeros(2)
@@ -291,6 +422,10 @@ class MarsNavEnv(VecEnv):
         self.lidar_dropout = zeros()
         self.lidar_shift = torch.zeros(n, dtype=torch.long, device=dev)
         self.odom_scale = zeros(2)
+        self.camera_period = zeros()
+        self.camera_dropout = zeros()
+        self.camera_noise_k = zeros()
+        self.camera_pitch = zeros()
 
     def _capture_chunk(self) -> wp.Graph:
         """CHUNK_SUBSTEPS physics steps with sensors off; _forward_graph computes them once per control step."""
@@ -328,6 +463,9 @@ class MarsNavEnv(VecEnv):
 
         goal_dist = torch.linalg.norm(self.goal - self._pose()[:, :2], dim=1)
         clearance = self._clearance(self._robot_center())
+        pose = self._pose()
+        forward_vel = pose[:, 2].cos() * self._qvel[:, self._base_dofs[0]] + pose[:, 2].sin() * self._qvel[:, self._base_dofs[1]]
+        reversing = (-forward_vel / MAX_FORWARD_SPEED).clamp(0.0, 1.0)
         reached = goal_dist < GOAL_RADIUS
         collided = clearance < 0.0
         terminated = (reached | collided) & ~diverged
@@ -340,7 +478,8 @@ class MarsNavEnv(VecEnv):
             + REWARD_COLLISION * collided
             + REWARD_TIME
             + REWARD_PROXIMITY * ((PROXIMITY_MARGIN - clearance).clamp(min=0.0) / PROXIMITY_MARGIN)
-            + REWARD_ACTION_RATE * (self.action_history[:, 0] - self.action_history[:, 1]).square().sum(dim=1),
+            + REWARD_ACTION_RATE * (self.action_history[:, 0] - self.action_history[:, 1]).square().sum(dim=1)
+            + REWARD_REVERSE * reversing,
         )
         self.prev_goal_dist = goal_dist
 
@@ -354,6 +493,8 @@ class MarsNavEnv(VecEnv):
                 "Episode/timeout": timed_out[dones].float(),
                 "Episode/diverged": diverged[dones].float(),
                 "Episode/odom_error_m": odom_error[dones],
+                "Policy/reversing": (forward_vel < -0.05).float().mean(),
+                "Policy/forward_speed": forward_vel.clamp(min=0.0).mean(),
             },
         }
 
@@ -495,7 +636,9 @@ class MarsNavEnv(VecEnv):
 
         lo, hi = OBSTACLE_DENSITY_RANGE
         density = lo + (hi - lo) * rand(1)
-        active = torch.cat((rand(N_WALLS) < WALL_PRESENT_PROB, rand(n_obstacles) < density), dim=1)
+        lo, hi = LOW_OBSTACLE_DENSITY_RANGE
+        low_density = (lo + (hi - lo) * rand(1)) * (rand(1) < LOW_OBSTACLE_EPISODE_PROB)
+        active = torch.cat((rand(N_WALLS) < WALL_PRESENT_PROB, rand(N_TALL) < density, rand(N_LOW) < low_density), dim=1)
         # Obstacles that would overlap the spawn or the goal are left parked rather than resampled.
         spawn_clear = ROBOT_RADIUS + abs(ROBOT_CENTER_OFFSET) + OBSTACLE_SPAWN_CLEARANCE
         is_obstacle = torch.arange(N_SHAPES, device=dev) >= N_WALLS
@@ -527,6 +670,12 @@ class MarsNavEnv(VecEnv):
         shift = torch.round(torch.randn(n, device=dev) * LIDAR_YAW_OFFSET_STD_DEG * LIDAR_BEAMS / 360).long()
         self.lidar_shift = keep(shift, self.lidar_shift)
         self.odom_scale = keep(uniform(ODOM_SCALE_RANGE, 2), self.odom_scale)
+        period = uniform(CAMERA_PERIOD_RANGE)
+        self.camera_period = keep(period, self.camera_period)
+        self.camera_age = keep(period * (1 + torch.rand(n, device=dev)) - CONTROL_DT, self.camera_age)
+        self.camera_dropout = keep(uniform(CAMERA_DROPOUT_RANGE), self.camera_dropout)
+        self.camera_noise_k = keep(uniform(CAMERA_NOISE_K_RANGE), self.camera_noise_k)
+        self.camera_pitch = keep(torch.randn(n, device=dev) * math.radians(CAMERA_PITCH_STD_DEG), self.camera_pitch)
 
     def _scan_ranges(self) -> torch.Tensor:
         """Raw beams with misses and self-hits as max range: what the lidar sees with no noise."""
@@ -549,6 +698,94 @@ class MarsNavEnv(VecEnv):
         """Min-pools beams into LIDAR_BINS sectors; must match the robot-side binning in deploy_spec()."""
         return ranges.view(self.num_envs, LIDAR_BINS, -1).min(dim=2).values / LIDAR_MAX_RANGE
 
+    def _camera_ray_distances(self) -> torch.Tensor:
+        """(n, rays) distance from the camera to the first floor or obstacle hit; inf for a miss or a
+        ray the robot's own body blocks. Exact ray-box / ray-cylinder intersection in each shape's frame."""
+        pose = self._pose()
+        cos, sin = pose[:, 2].cos()[:, None], pose[:, 2].sin()[:, None]
+        rel = self.shape_xy - pose[:, None, :2]  # (n, S, 2), world axes
+        rel = torch.stack((cos * rel[..., 0] + sin * rel[..., 1], -sin * rel[..., 0] + cos * rel[..., 1]), dim=-1)  # base axes
+        psi = self.shape_yaw - pose[:, 2:3]  # shape yaw in the base frame
+        c, s = psi.cos()[..., None], psi.sin()[..., None]  # (n, S, 1)
+        # Ray origin and horizontal direction in each shape's frame.
+        o = self._camera_pos[None, None, :2] - rel  # (n, S, 2)
+        ox, oy = (c[..., 0] * o[..., 0] + s[..., 0] * o[..., 1])[..., None], (-s[..., 0] * o[..., 0] + c[..., 0] * o[..., 1])[..., None]
+        dx = c * self._ray_dir[:, 0] + s * self._ray_dir[:, 1]  # (n, S, R)
+        dy = -s * self._ray_dir[:, 0] + c * self._ray_dir[:, 1]
+        dz = self._ray_dir[:, 2]
+        # Vertical slab [0, height].
+        oz = self._camera_pos[2]
+        tz0, tz1 = (0.0 - oz) / dz, (self._shape_height[:, None] - oz) / dz
+        t_in, t_out = torch.minimum(tz0, tz1), torch.maximum(tz0, tz1)  # (S, R), broadcast over n
+        # Boxes: x and y slabs.
+        half = self._shape_half[None, :, :, None]  # (1, S, 2, 1)
+        tx0, tx1 = (-half[:, :, 0] - ox) / dx, (half[:, :, 0] - ox) / dx
+        ty0, ty1 = (-half[:, :, 1] - oy) / dy, (half[:, :, 1] - oy) / dy
+        box_in = torch.maximum(torch.minimum(tx0, tx1), torch.minimum(ty0, ty1))
+        box_out = torch.minimum(torch.maximum(tx0, tx1), torch.maximum(ty0, ty1))
+        # Cylinders: |o + t d| = radius in the horizontal plane.
+        a = dx.square() + dy.square()
+        b = 2 * (ox * dx + oy * dy)
+        k = ox.square() + oy.square() - self._shape_round[None, :, None].square()
+        root = (b.square() - 4 * a * k).clamp(min=0.0).sqrt()
+        miss = b.square() - 4 * a * k < 0
+        cyl_in = torch.where(miss, torch.inf, (-b - root) / (2 * a))
+        cyl_out = torch.where(miss, -torch.inf, (-b + root) / (2 * a))
+        cylinder = self._shape_is_cylinder[None, :, None]
+        enter = torch.maximum(torch.where(cylinder, cyl_in, box_in).nan_to_num(-torch.inf), t_in)
+        leave = torch.minimum(torch.where(cylinder, cyl_out, box_out).nan_to_num(torch.inf), t_out)
+        hit = (leave >= enter) & (leave > 0)
+        shape_dist = torch.where(hit, enter.clamp(min=0.0), torch.inf).amin(dim=1)  # (n, R)
+        floor = torch.where(dz < 0, -oz / dz, torch.inf)
+        dist = torch.minimum(shape_dist, floor.expand_as(shape_dist))
+        return torch.where(self._ray_blocked, torch.inf, dist)
+
+    def _camera_points(self, noisy: bool, dist: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+        """The ray fan as stereo points: (n, rays, 3) in base_link and (n, rays) optical-axis depth;
+        misses are inf. `noisy` adds the stereo depth noise, holes, spurious matches and the pitch
+        error (the points are placed with the nominal geometry while the head is off by camera_pitch).
+        `dist` reuses this step's _camera_ray_distances()."""
+        n = self.num_envs
+        dist = self._camera_ray_distances() if dist is None else dist
+        elevation = self._ray_el.expand(n, -1)
+        if noisy:
+            depth = dist * self._ray_depth_per_m
+            dist = dist + torch.randn_like(dist) * self.camera_noise_k[:, None] * depth.clamp(max=10.0).square() / self._ray_depth_per_m
+            spurious = torch.rand_like(dist) < CAMERA_SPURIOUS_PROB
+            fake = (CAMERA_MIN_DEPTH + torch.rand_like(dist) * (CAMERA_MAX_DEPTH - CAMERA_MIN_DEPTH)) / self._ray_depth_per_m
+            dist = torch.where(spurious, fake, dist)
+            dist = torch.where(torch.rand_like(dist) < self.camera_dropout[:, None], torch.inf, dist)
+            elevation = elevation - self.camera_pitch[:, None]
+        horizontal = dist * elevation.cos()
+        points = torch.stack(
+            (
+                self._camera_pos[0] + horizontal * self._ray_az.cos(),
+                self._camera_pos[1] + horizontal * self._ray_az.sin(),
+                self._camera_pos[2] + dist * elevation.sin(),
+            ),
+            dim=-1,
+        )
+        return points, dist * self._ray_depth_per_m
+
+    def _camera_bins(self, noisy: bool, dist: torch.Tensor | None = None) -> torch.Tensor:
+        """Stereo points -> CAMERA_BINS obstacle ranges (0-1), as deploy_spec() describes; must match
+        the robot-side skills/rl_nav_utils.bin_camera."""
+        points, depth = self._camera_points(noisy, dist)
+        x, y, z = points.unbind(-1)
+        r = torch.hypot(x, y).nan_to_num(CAMERA_MAX_RANGE)
+        bearing = torch.atan2(y, x)
+        obstacle = (
+            (depth >= CAMERA_MIN_DEPTH)
+            & (depth <= CAMERA_MAX_DEPTH)
+            & (z >= CAMERA_MIN_HEIGHT + CAMERA_MIN_HEIGHT_PER_M * r)
+            & (z <= CAMERA_MAX_HEIGHT)
+            & (bearing.abs() < CAMERA_HFOV / 2)
+        )
+        index = ((bearing.nan_to_num(0.0) + CAMERA_HFOV / 2) / (CAMERA_HFOV / CAMERA_BINS)).long().clamp(0, CAMERA_BINS - 1)
+        ranges = torch.where(obstacle, r, CAMERA_MAX_RANGE).clamp(max=CAMERA_MAX_RANGE)
+        out = torch.full((self.num_envs, CAMERA_BINS), CAMERA_MAX_RANGE, device=self.device)
+        return out.scatter_reduce(1, index, ranges, reduce="amin") / CAMERA_MAX_RANGE
+
     def _goal_features(self, pose: torch.Tensor) -> torch.Tensor:
         cos, sin = pose[:, 2].cos(), pose[:, 2].sin()
         delta = self.goal - pose[:, :2]
@@ -562,9 +799,14 @@ class MarsNavEnv(VecEnv):
         fresh = self.scan_age >= self.scan_period
         self.scan_age = torch.where(fresh, self.scan_age - self.scan_period, self.scan_age)
         self.scan_obs = torch.where(fresh[:, None], self._bin(self._noisy_scan()), self.scan_obs)
+        self.camera_age += CONTROL_DT
+        fresh = self.camera_age >= self.camera_period
+        self.camera_age = torch.where(fresh, self.camera_age - self.camera_period, self.camera_age)
+        ray_dist = self._camera_ray_distances()
+        self.camera_obs = torch.where(fresh[:, None], self._camera_bins(True, ray_dist), self.camera_obs)
         history = self.action_history.flatten(1)
         actor = torch.cat(
-            (self.scan_obs, self._goal_features(self.est_pose), self.meas_vel / self._max_cmd, history), dim=1
+            (self.scan_obs, self._goal_features(self.est_pose), self.meas_vel / self._max_cmd, history, self.camera_obs), dim=1
         )
 
         pose = self._pose()
@@ -582,11 +824,15 @@ class MarsNavEnv(VecEnv):
                 self.motor_vel / self._max_cmd,
                 self.scan_age[:, None] / SCAN_PERIOD_RANGE[1],
                 odom_error * 10.0,
+                self.camera_age[:, None] / CAMERA_PERIOD_RANGE[1],
+                self.camera_dropout[:, None],
+                self.camera_pitch[:, None] / math.radians(CAMERA_PITCH_STD_DEG),
             ),
             dim=1,
         )
         critic = torch.cat(
-            (self._bin(self._scan_ranges()), self._goal_features(pose), true_vel / self._max_cmd, history, hidden), dim=1
+            (self._bin(self._scan_ranges()), self._goal_features(pose), true_vel / self._max_cmd, history, self._camera_bins(False, ray_dist), hidden),
+            dim=1,
         )
         return TensorDict({"policy": actor, "critic": critic}, batch_size=[self.num_envs], device=self.device)
 
