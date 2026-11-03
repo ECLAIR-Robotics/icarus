@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Command-line checks for rl_nav_node on the robot (see RL_NAV_ROBOT_CHECKLIST.md).
 
-    python3 scripts/rl_nav_cli.py status [--watch]       one line from /icarus/rl_nav/status
+    python3 scripts/rl_nav_cli.py status [--watch]       one line from /icarus/rl_nav/status (+ camera_* for camera policies)
     python3 scripts/rl_nav_cli.py goal FWD LEFT          goal FWD m ahead, LEFT m left of the robot now (sent in odom)
     python3 scripts/rl_nav_cli.py cancel                 stop the run
     python3 scripts/rl_nav_cli.py scan                   /scan geometry, rate and nearest raw return (no node needed)
@@ -83,6 +83,15 @@ def _status_line(data: str) -> str:
         "scan_age": d["scan_age"],
         "odom_age": d["odom_age"],
     }
+    camera = d.get("camera")
+    if camera:
+        bins = camera["bins"] or []
+        nearest = "-"
+        if bins and min(bins) < 0.999:
+            i = min(range(len(bins)), key=bins.__getitem__)
+            angle = math.degrees(-camera["hfov"] / 2 + (i + 0.5) * camera["hfov"] / len(bins))
+            nearest = f"{bins[i] * camera['max_range']:.2f} m at {angle:+.0f} deg"
+        fields.update(camera_nearest=nearest, camera_age=camera["age"], camera_pitch_deg=camera["pitch_deg"])
     return " ".join(f"{k}={v}" for k, v in fields.items())
 
 

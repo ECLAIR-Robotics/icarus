@@ -12,6 +12,18 @@
     "frame": "base_laser (same axes as base_link)",
     "binning": "beam angle a (rad, CCW, 0 = forward) wrapped to [-pi, pi) goes to bin floor((a + pi) / (2 pi / bins)); each bin is the min valid range; returns that are non-finite, outside [range_min, range_max] of the scan or below min_range count as max_range; then clip to max_range and divide by it"
   },
+  "camera": {
+    "bins": 16,
+    "hfov": 1.9547687622336491,
+    "min_depth": 0.25,
+    "max_depth": 2.0,
+    "min_height": 0.04,
+    "min_height_per_m": 0.02,
+    "max_height": 0.4,
+    "max_range": 2.0,
+    "topic": "/mars/main_camera/points",
+    "binning": "points (camera_optical_frame) with optical-axis depth z in [min_depth, max_depth] are moved to base_link; with bearing b = atan2(y, x) and range r = hypot(x, y) (both from base_link's origin), those with height z in [min_height + min_height_per_m * r, max_height] are obstacles; points with |b| < hfov/2 go to bin floor((b + hfov/2) / (hfov / bins)), each bin is the min r; empty bins are max_range; then clip to max_range and divide by it"
+  },
   "observation": [
     [
       "lidar",
@@ -47,6 +59,11 @@
       "action_history",
       6,
       "last clamped actions, newest first, (fwd, turn) pairs"
+    ],
+    [
+      "camera",
+      16,
+      "binned stereo obstacle points, 0-1, bin 0 = rightmost"
     ]
   ],
   "action": [

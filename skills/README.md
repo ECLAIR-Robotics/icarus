@@ -5,7 +5,7 @@ loads it, hot-reloads it on edit, and lists its skills as `icarus_skills/<name>`
 
 | File | What |
 |---|---|
-| `rl_nav.py` | `RlNavigate`: drives to a goal given relative to the robot, avoiding obstacles with the lidar policy trained in `mjwarp/` |
+| `rl_nav.py` | `RlNavigate`: drives to a goal given relative to the robot, avoiding obstacles with the lidar policy trained in `mjwarp/`. Skills can't read the stereo cloud, so it refuses policies trained with the camera: run those with `icarus/rl_nav_node.py` |
 | `rl_nav_utils.py` | No ROS, no torch: the policy runners (onnxruntime / numpy), lidar binning, observation builder (checked against the trainer by `mjwarp/verify_deploy.py`), and `NavController`, the per-tick policy + safety loop shared with `icarus/rl_nav_node.py` |
 | `rl_nav_policy/` | `policy.onnx`, `policy.npz` + `policy_io.json`, written by `mjwarp/play.py --export --install` |
 
@@ -90,6 +90,7 @@ without publishing commands.
 | Interface | Type | |
 |---|---|---|
 | `/scan`, `/odom`, TF | in | goal frame -> odom every tick, base_link -> laser, map -> laser at scan time (display) |
+| `/mars/main_camera/points` | `sensor_msgs/PointCloud2` | camera policies only (`policy_io.json` has `camera`): stereo points, moved to base_link through TF at their stamp and binned by `rl_nav_utils.bin_camera`; the head must stay level |
 | `/icarus/rl_nav/goal` | `geometry_msgs/PoseStamped` | goal in `map` or `odom` (orientation ignored); also works from RViz or other nodes |
 | `/icarus/rl_nav/cancel` | `std_msgs/Bool` | `true` stops the run |
 | `/icarus/rl_nav/status` | `std_msgs/String` (JSON) | state, poses in the display frame, scan, bins, command, timings (5 Hz) |

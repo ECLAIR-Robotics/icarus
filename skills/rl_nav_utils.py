@@ -24,6 +24,8 @@ class NavSpec:
     lidar_bins: int
     lidar_min_range: float
     lidar_max_range: float
+    camera: "CameraSpec | None" = None
+    """The stereo-camera channel, for policies trained with one (policy_io.json has "camera")."""
 
     @classmethod
     def load(cls, path: Path) -> "NavSpec":
@@ -39,6 +41,7 @@ class NavSpec:
             lidar_bins=lidar["bins"],
             lidar_min_range=lidar["min_range"],
             lidar_max_range=lidar["max_range"],
+            camera=CameraSpec(**{k: raw["camera"][k] for k in CameraSpec.__dataclass_fields__}) if "camera" in raw else None,
         )
 
     def bin_centers(self) -> np.ndarray:
@@ -47,7 +50,24 @@ class NavSpec:
         return -math.pi + (np.arange(self.lidar_bins) + 0.5) * width
 
     def observation_size(self) -> int:
-        return self.lidar_bins + 5 + 2 + 2 * self.action_history
+        return self.lidar_bins + 5 + 2 + 2 * self.action_history + (self.camera.bins if self.camera else 0)
+
+
+@dataclass(frozen=True)
+class CameraSpec:
+    bins: int
+    hfov: float
+    min_depth: float
+    max_depth: float
+    min_height: float
+    min_height_per_m: float
+    max_height: float
+    max_range: float
+    topic: str
+
+    def bin_centers(self) -> np.ndarray:
+        """Bearing (rad, base frame, CCW, 0 = forward) at the middle of each camera bin."""
+        return -self.hfov / 2 + (np.arange(self.bins) + 0.5) * self.hfov / self.bins
 
 
 class Policy(Protocol):
@@ -145,6 +165,28 @@ def bin_scan(
     return out / spec.lidar_max_range
 
 
+def bin_camera(camera: CameraSpec, points: np.ndarray, depth: np.ndarray) -> np.ndarray:
+    """Stereo points -> the policy's camera observation (camera.bins values in 0-1, 1 = no obstacle
+    within max_range), as nav_env.deploy_spec() describes. `points` (N, 3) are in base_link and
+    `depth` (N,) is each point's depth along the optical axis (z in camera_optical_frame)."""
+    p = np.asarray(points, dtype=np.float32).reshape(-1, 3)
+    d = np.asarray(depth, dtype=np.float32).reshape(-1)
+    r = np.hypot(p[:, 0], p[:, 1])
+    bearing = np.arctan2(p[:, 1], p[:, 0])
+    keep = (
+        np.isfinite(r)
+        & (d >= camera.min_depth)
+        & (d <= camera.max_depth)
+        & (p[:, 2] >= camera.min_height + camera.min_height_per_m * r)
+        & (p[:, 2] <= camera.max_height)
+        & (np.abs(bearing) < camera.hfov / 2)
+    )
+    index = np.clip(((bearing[keep] + camera.hfov / 2) / (camera.hfov / camera.bins)).astype(np.int64), 0, camera.bins - 1)
+    out = np.full(camera.bins, camera.max_range, dtype=np.float32)
+    np.minimum.at(out, index, np.minimum(r[keep], camera.max_range))
+    return out / camera.max_range
+
+
 def goal_in_base(goal_xy: tuple[float, float], pose: tuple[float, float, float]) -> tuple[float, float]:
     x, y, theta = pose
     dx, dy = goal_xy[0] - x, goal_xy[1] - y
@@ -163,15 +205,20 @@ def build_observation(
     linear_velocity: float,
     angular_velocity: float,
     action_history: np.ndarray,
+    camera_bins: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Same layout as MarsNavEnv's actor observation; `action_history` is (action_history, 2), newest first."""
+    """Same layout as MarsNavEnv's actor observation; `action_history` is (action_history, 2), newest
+    first. `camera_bins` only for policies trained with the camera (spec.camera)."""
     gx, gy = goal_body
     heading = math.atan2(gy, gx)
     goal = [gx / spec.goal_obs_scale, gy / spec.goal_obs_scale, math.hypot(gx, gy) / spec.goal_obs_scale]
     velocity = [linear_velocity / spec.max_forward_speed, angular_velocity / spec.max_turn_rate]
-    return np.concatenate(
-        (lidar_bins, goal, [math.cos(heading), math.sin(heading)], velocity, action_history.ravel())
-    ).astype(np.float32)
+    parts = [lidar_bins, goal, [math.cos(heading), math.sin(heading)], velocity, action_history.ravel()]
+    if spec.camera is not None:
+        if camera_bins is None:
+            raise ValueError("this policy was trained with the stereo camera: pass camera_bins")
+        parts.append(camera_bins)
+    return np.concatenate(parts).astype(np.float32)
 
 
 class OdomVelocity:
@@ -216,10 +263,12 @@ class NavCommand:
     """The policy's clamped action, before the safety checks."""
     bins: np.ndarray
     """What the policy saw of the lidar, 0-1."""
+    camera_bins: np.ndarray | None
+    """What the policy saw of the stereo camera, 0-1 (camera policies only)."""
     blocked: bool
     """Forward motion zeroed: a return within safety_stop_range in the direction of travel."""
     stale: bool
-    """Both speeds zeroed: the scan or odometry stopped updating."""
+    """Both speeds zeroed: the scan, odometry or camera stopped updating."""
 
 
 @dataclass
@@ -237,6 +286,8 @@ class NavController:
     safety_sector: float = math.radians(60)
     stale_scan_s: float = 0.6
     stale_odom_s: float = 0.3
+    stale_camera_s: float = 1.0
+    """The stereo pipeline runs at <= 8 Hz and drops frames under load."""
     safety_stops: int = 0
     _history: np.ndarray = field(init=False, repr=False)
     _velocity: OdomVelocity = field(init=False, repr=False)
@@ -254,17 +305,31 @@ class NavController:
         self._velocity = OdomVelocity()
         self._bins = np.ones(self.spec.lidar_bins, dtype=np.float32)
         self._scan_stamp = None
-        self._changed_at = {"scan": (None, now), "odom": (None, now)}
+        self._changed_at = {"scan": (None, now), "odom": (None, now), "camera": (None, now)}
         self.safety_stops = 0
 
-    def step(self, goal_body: tuple[float, float], pose: tuple[float, float, float], odom_stamp: float, scan: Scan, now: float) -> NavCommand:
+    def step(
+        self,
+        goal_body: tuple[float, float],
+        pose: tuple[float, float, float],
+        odom_stamp: float,
+        scan: Scan,
+        now: float,
+        camera_bins: np.ndarray | None = None,
+        camera_stamp: float | None = None,
+    ) -> NavCommand:
         """`pose` is the odometry pose (x, y, yaw) stamped `odom_stamp` (s); `now` is a local
-        monotonic time (s), used only to notice feeds that stopped updating."""
+        monotonic time (s), used only to notice feeds that stopped updating. Camera policies also
+        need the latest `camera_bins` (bin_camera) and their stamp; until the first frame, pass
+        None and the base is held (stale)."""
         if scan.stamp != self._scan_stamp:
             self._scan_stamp = scan.stamp
             self._bins = bin_scan(self.spec, scan.ranges, scan.angle_min, scan.angle_increment, scan.range_min, scan.range_max)
         linear_velocity, angular_velocity = self._velocity.update(pose, odom_stamp)
-        obs = build_observation(self.spec, self._bins, goal_body, linear_velocity, angular_velocity, self._history)
+        camera = None
+        if self.spec.camera is not None:
+            camera = np.ones(self.spec.camera.bins, dtype=np.float32) if camera_bins is None else camera_bins
+        obs = build_observation(self.spec, self._bins, goal_body, linear_velocity, angular_velocity, self._history, camera)
         action = np.clip(self.policy(obs), -1.0, 1.0).astype(np.float32)
         self._history = np.roll(self._history, 1, axis=0)
         self._history[0] = action
@@ -272,14 +337,15 @@ class NavController:
 
         scan_fresh = self._fresh("scan", scan.stamp, self.stale_scan_s, now)
         odom_fresh = self._fresh("odom", odom_stamp, self.stale_odom_s, now)
-        stale = not (scan_fresh and odom_fresh)
+        camera_fresh = self.spec.camera is None or (camera_stamp is not None and self._fresh("camera", camera_stamp, self.stale_camera_s, now))
+        stale = not (scan_fresh and odom_fresh and camera_fresh)
         blocked = False
         if stale:
             linear, angular = 0.0, 0.0
         elif self._blocked(linear):
             linear, blocked = 0.0, True
             self.safety_stops += 1
-        return NavCommand(linear, angular, action, self._bins, blocked, stale)
+        return NavCommand(linear, angular, action, self._bins, camera, blocked, stale)
 
     def _fresh(self, name: str, stamp: float, limit: float, now: float) -> bool:
         """Tracks when each feed's stamp last changed by the local clock, so it works whatever

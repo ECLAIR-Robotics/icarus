@@ -138,6 +138,7 @@ kbd { font: 11px ui-monospace, monospace; border: 1px solid var(--hairline-stron
       <span><i style="background:var(--accent)"></i>&lt; 1.5 m</span>
       <span><i style="background:var(--teal)"></i>farther</span>
       <span><i style="background:var(--ok)"></i>goal</span>
+      <span id="cameraLegend" hidden><i style="background:var(--eval)"></i>stereo camera</span>
     </div>
   </section>
 
@@ -148,6 +149,8 @@ kbd { font: 11px ui-monospace, monospace; border: 1px solid var(--hairline-stron
       <div class="stat"><div class="k">Step time</div><div class="v" id="stepUs">—</div></div>
       <div class="stat"><div class="k">Scan age</div><div class="v" id="scanAge">—</div></div>
       <div class="stat"><div class="k">Odom age</div><div class="v" id="odomAge">—</div></div>
+      <div class="stat" data-camera hidden><div class="k">Camera age</div><div class="v" id="cameraAge">—</div></div>
+      <div class="stat" data-camera hidden><div class="k">Camera pitch</div><div class="v" id="cameraPitch">—</div></div>
     </div>
     <div class="hint">Drag to pan, scroll or +/− to zoom. Teleop overrides the policy (the cmd_vel mux gives it priority). Goals beyond the max distance are refused.</div>
   </section>
@@ -298,6 +301,16 @@ function onStatus() {
   $("scanAge").classList.toggle("warn", s.scan_age == null || s.scan_age > 0.6);
   $("odomAge").textContent = fmt(s.odom_age, 2, " s");
   $("odomAge").classList.toggle("warn", s.odom_age == null || s.odom_age > 0.3);
+  const cam = s.camera;
+  for (const el of document.querySelectorAll("[data-camera]")) el.hidden = !cam;
+  $("cameraLegend").hidden = !cam;
+  if (cam) {
+    $("cameraAge").textContent = fmt(cam.age, 2, " s");
+    $("cameraAge").classList.toggle("warn", cam.age == null || cam.age > 1.0);
+    $("cameraPitch").textContent = fmt(cam.pitch_deg, 1, "°");
+    // The policy trained with the camera level; a few degrees is fine.
+    $("cameraPitch").classList.toggle("warn", cam.pitch_deg == null || Math.abs(cam.pitch_deg) > 5);
+  }
   if (document.activeElement !== $("dryRun") && !dryRunBusy) $("dryRun").checked = !!s.dry_run;
   const active = s.state === "driving" || s.state === "dry_run";
   const cmd = active && s.cmd ? s.cmd : [0, 0];
@@ -455,6 +468,17 @@ function draw() {
       ctx.fillStyle = binColor(r, 0.13); ctx.fill();
     });
   }
+  // Stereo camera obstacles (base frame, forward cone), as the policy sees them.
+  if (s.camera?.bins && s.robot) {
+    const [rx, ry] = toScreen(s.robot[0], s.robot[1]), n = s.camera.bins.length, width = s.camera.hfov / n;
+    s.camera.bins.forEach((b, i) => {
+      if (b >= 0.999) return;
+      const a0 = s.robot[2] - s.camera.hfov / 2 + i * width;
+      ctx.beginPath(); ctx.moveTo(rx, ry);
+      ctx.arc(rx, ry, b * s.camera.max_range * view.scale, -(a0 + width), -a0);
+      ctx.closePath(); ctx.fillStyle = "rgb(181 140 230 / 22%)"; ctx.fill();
+    });
+  }
   // Raw scan.
   if (s.scan) {
     ctx.fillStyle = C.danger;
@@ -530,6 +554,21 @@ function drawPolicy() {
     g.beginPath(); g.moveTo(mid, mid); g.arc(mid, mid, r * k, sa(a0 + width), sa(a0)); g.closePath();
     g.fillStyle = binColor(r, b >= 0.999 ? 0.06 : 0.55); g.fill();
   });
+  if (s.camera?.bins) {
+    // Camera bins on top of the lidar's: an outline arc at each bin's nearest obstacle.
+    const n = s.camera.bins.length, w = s.camera.hfov / n;
+    g.strokeStyle = C.eval; g.lineWidth = 3;
+    s.camera.bins.forEach((b, i) => {
+      if (b >= 0.999) return;
+      const a0 = -s.camera.hfov / 2 + i * w;
+      g.beginPath(); g.arc(mid, mid, b * s.camera.max_range * k, sa(a0 + w), sa(a0)); g.stroke();
+    });
+    g.setLineDash([3, 4]); g.lineWidth = 1; g.globalAlpha = 0.5;
+    for (const a of [-s.camera.hfov / 2, s.camera.hfov / 2]) {
+      g.beginPath(); g.moveTo(mid, mid); g.lineTo(mid + s.camera.max_range * k * Math.cos(sa(a)), mid + s.camera.max_range * k * Math.sin(sa(a))); g.stroke();
+    }
+    g.setLineDash([]); g.globalAlpha = 1;
+  }
   if (s.goal && s.robot) {
     const dx = s.goal[0] - s.robot[0], dy = s.goal[1] - s.robot[1];
     const bxg = Math.cos(s.robot[2]) * dx + Math.sin(s.robot[2]) * dy, byg = -Math.sin(s.robot[2]) * dx + Math.cos(s.robot[2]) * dy;

@@ -10,7 +10,9 @@ from `mjwarp/` unless stated otherwise. The robot side is `../skills/` (see its 
   a walled room of random size (4-8 m per side; each wall is missing with 15% chance). It must
   drive to a random goal (>= 1 m away, reached within 0.3 m) without hitting a random subset of
   16 obstacles: cylinders of radius 8-50 cm and rotated boxes from thin panels to 2 m walls.
-  Episodes end on goal, collision, or 45 s.
+  70% of rooms also get some of 9 **low obstacles** (6-14 cm tall, under the lidar's 17 cm
+  plane), which only the head's stereo camera can see. Episodes end on goal, collision, or 45 s.
+  Reversing is penalized (`REWARD_REVERSE`), since the camera only looks forward.
 - **Realism**: everything the actor sees is noisy and delayed, with parameters drawn per
   episode. See the module docstring and constants of `nav_env.py`.
   - Gaussian command latency (70 +/- 25 ms, plus 10 ms jitter per step), simulated in 10 ms
@@ -18,15 +20,24 @@ from `mjwarp/` unless stated otherwise. The robot side is `../skills/` (see its 
   - A randomized motor model: gain, turn bias, deadband, first-order lag, acceleration limit,
     command noise.
   - Lidar at 5-10 Hz with range noise, dropouts, spurious returns and mount-yaw offset.
+  - Stereo camera at 4-8 Hz: a fan of 464 rays from the head camera, intersected analytically
+    with the floor and the obstacles (all boxes and cylinders; much cheaper than mujoco_warp
+    rangefinders, which cost ~20 s per step from inside the head housing). Depth clamped to
+    0.25-2 m like `mars_cam`'s stereo_depth_estimator, range-squared depth noise, holes,
+    spurious matches, and a head pitch error. Rays the robot's own body blocks are masked.
   - Wheel odometry with scale error, random-walk drift and no slip sensing. The goal and
     velocity observations come from it.
   - Random pushes.
   - The critic gets the clean state plus these hidden parameters (asymmetric actor-critic).
-- **Policy I/O**: 53 actor observations (40 lidar bins, goal from odometry in the base frame,
-  odometry velocity, last 3 actions) and 2 actions (forward, turn) in [-1, 1], scaled to
+- **Policy I/O**: 69 actor observations (40 lidar bins, goal from odometry in the base frame,
+  odometry velocity, last 3 actions, 16 stereo-camera bins) and 2 actions (forward, turn) in [-1, 1], scaled to
   0.4 m/s and 1.0 rad/s (innate-os `motion_control.yaml`), at 10 Hz. The arm and head hold
-  their home pose. `nav_env.deploy_spec()` is the robot-side contract; it is exported as
-  `policy_io.json`.
+  their home pose (the camera looks level). `nav_env.deploy_spec()` is the robot-side contract;
+  it is exported as `policy_io.json`. Its `camera` section says how the robot bins
+  `/mars/main_camera/points`: points 0.25-2 m deep, moved to base_link, higher than
+  4 cm + 2 cm per metre of range (so a ~1 deg head pitch error doesn't turn the floor into
+  obstacles) and lower than 40 cm, min-pooled by bearing into 16 bins across 112 deg.
+  Camera policies run only in `icarus/rl_nav_node.py`; the RlNavigate skill refuses them.
 - **Trainer** (`train.py`): rsl_rl PPO (`rsl-rl-lib` 5.x), with MLP actor and critic of size
   256-256-128 and observation normalization. The actor reads obs group `policy` and the critic
   reads `critic`. It runs one process per GPU through `torchrun`, and rsl_rl all-reduces the
@@ -36,7 +47,7 @@ from `mjwarp/` unless stated otherwise. The robot side is `../skills/` (see its 
   - `train.py`: training, with `TRAIN_CFG` holding the PPO hyperparameters.
   - `train.sh`: the launcher.
   - `play.py`: evaluation, video, export (`--export`) and install into the skill pack (`--install`).
-  - `verify_deploy.py`: checks the robot-side code against the trainer, then runs the real skill
+  - `verify_deploy.py`: checks the robot-side code (incl. camera binning) against the trainer, then runs NavController
     closed-loop in the sim.
   - `watch_videos.sh`: renders a video every N iterations while a run trains.
   - `warp_env.py` / `robot_env.py`: the shared simulator. `MarsWarpEnv` and `build_model`
@@ -118,7 +129,7 @@ python play.py                       # newest checkpoint under logs/nav, 4 world
 python play.py --checkpoint logs/nav/<run>/model_<N>.pt --num-envs 9 --seconds 30
 python play.py --export              # also writes exported/policy.{onnx,pt,npz} + policy_io.json
 python play.py --no-video --export --install   # export, and copy policy.{onnx,npz} + policy_io.json into ../skills/rl_nav_policy/
-python verify_deploy.py --checkpoint <the installed model_N.pt> --episodes 8   # robot-code checks + closed-loop skill runs
+python verify_deploy.py --checkpoint <the installed model_N.pt> --episodes 8   # robot-code checks + closed-loop NavController runs
 ```
 
 - The video is written to `logs/nav/<run>/videos/model_<N>.mp4`. It is H.264 yuv420p, real
@@ -170,6 +181,8 @@ nohup python plot_rewards.py --watch > logs/plot_rewards.out 2>&1 &   # redraw e
   speeds) makes old checkpoints incompatible, and needs a re-export and re-install. The skill
   reads everything else it needs from `policy_io.json`.
 - **PPO and network**: `TRAIN_CFG` in `train.py`. The numpy runner implements ELU only.
+- Checkpoints from before the camera channel (53 observations, e.g. `logs/nav/2026-10-26_22-48-06`)
+  no longer load in the current env.
 - Checkpoints from the first run (`logs/nav/2026-10-26_18-56-05`, noise-free, 49 observations)
   no longer load in the current env.
 

@@ -29,7 +29,8 @@ to be wrong; the phases are ordered so that a wrong convention shows up before a
 
 | | |
 |---|---|
-| Inputs | `/scan` (LaserScan, frame `base_laser`, ~6 Hz: `/scan_fast` throttled), `/odom` (~30 Hz), TF |
+| Inputs | `/scan` (LaserScan, frame `base_laser`, ~6 Hz: `/scan_fast` throttled), `/odom` (~30 Hz), TF, and for camera policies the stereo cloud `/mars/main_camera/points` (PointCloud2, `camera_optical_frame`, <= 8 Hz, 0.25-2 m) |
+| Camera | Policies trained with the stereo camera (policy_io.json has a `camera` section) see low obstacles (6-14 cm) the lidar misses, only in a 112 deg cone ahead. The head must stay level (home pose) while driving. |
 | Output | `/cmd_vel_skills` (Twist, 10 Hz while driving, silent when idle) -> innate-os `cmd_vel_mux` -> `/cmd_vel`. Teleop overrides it. |
 | Goals | `/icarus/rl_nav/goal` (PoseStamped, frame `map` or `odom`; re-expressed in odom every tick) |
 | Cancel | `/icarus/rl_nav/cancel` (Bool `true`) |
@@ -71,14 +72,10 @@ Background: `skills/README.md` (section "Running it as a node with the web UI") 
          ~/icarus/scripts/rl_nav_cli.py ~/icarus/skills/rl_nav_utils.py \
          ~/icarus/skills/rl_nav_policy/{policy.onnx,policy.npz,policy_io.json}
       ```
-- [ ] 0.3 The policy files are the verified export (model_2999 of run `2026-10-26_22-48-06`):
-      ```zsh
-      md5sum ~/icarus/skills/rl_nav_policy/*
-      # a0dbaebac4208c13f318a2b928e27a35  policy_io.json
-      # fbd95035e7c0d1b62ebba8ee799cc686  policy.npz
-      # 89e3120ec47ed7b30b83025234011d7a  policy.onnx
-      ```
-      A mismatch is OK only if the operator says a newer policy was installed on purpose; record which.
+- [ ] 0.3 The policy files are the verified export: `md5sum ~/icarus/skills/rl_nav_policy/*` must match
+      the three checksums in the training report the operator gives you (docs/train-nav-policy.md
+      step 2.6). Then `python3 -c "import json; print('camera' in json.load(open('$HOME/icarus/skills/rl_nav_policy/policy_io.json')))"`:
+      `True` means a camera policy, and every step marked **[camera]** below applies; `False`: skip them.
 - [ ] 0.4 The innate-os stack is up: `innate` prints a healthy status, and `tmux ls` shows the
       `ros_nodes` session.
 
@@ -101,6 +98,12 @@ Background: `skills/README.md` (section "Running it as a node with the web UI") 
       `timeout 5 ros2 run tf2_ros tf2_echo map odom` must print a transform. Map-free mode is fine
       too (the node and UI then work in the `odom` frame); note which.
 - [ ] 1.7 Resources before starting the node: `free -m` and `uptime`. Record them.
+- [ ] 1.8 **[camera]** The stereo cloud exists: `ros2 topic hz /mars/main_camera/points` for ~5 s (expect
+      4-8 Hz; it's computed only while something subscribes, so it may take a few seconds to start).
+      `timeout 5 ros2 run tf2_ros tf2_echo base_link camera_optical_frame` prints a transform: translation
+      ~(0, 0.03, 0.26) and a rotation with the optical z axis pointing forward. No cloud or no transform: stop.
+- [ ] 1.9 **[camera]** The head is at its home (level) pose: `ros2 topic echo --once /mars/head/current_position`.
+      Ask the operator to set it level if it isn't, and not to move the head during runs.
 
 ## Phase 2: Start the node in dry run (no motion)
 
@@ -147,7 +150,9 @@ Background: `skills/README.md` (section "Running it as a node with the web UI") 
       (To restart the node later: `tmux kill-window -t ros_nodes:icarus-rlnav`, then run this again,
       without `dry_run:=true` once Phase 5 says so.)
 - [ ] 2.5 `rlnav status`. Pass: `state=idle`, `dry_run=True`, `scan_age` < 0.4, `odom_age` < 0.1, `robot`
-      not None, `frame=map` (or `odom` in map-free mode).
+      not None, `frame=map` (or `odom` in map-free mode). **[camera]** also `camera_age` < 1.0 and
+      `camera_pitch_deg` within +-5 (the policy trained with a level camera; more than ~2 deg makes the
+      floor look like obstacles far out, so report the value). The node log line says `(lidar + stereo camera)`.
 - [ ] 2.6 Idle means silent: `timeout 3 ros2 topic echo /cmd_vel_skills` prints **nothing**.
 - [ ] 2.7 UI: `curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8080/` prints 200, and
       `curl -s http://localhost:8080/config.json` lists the topics. Give the operator the URL
@@ -184,6 +189,12 @@ home/rest pose: training only saw it at home, and an arm hanging in front would 
       obstacles); if the side is clear and it's still reversed, stop and report.
 - [ ] 3.4 `rlnav cancel` gives `state=cancelled`.
 - [ ] 3.5 Refusal: `rlnav goal 5.5 0` gives `state=error` with "the policy handles up to 5.0 m".
+- [ ] 3.6 **[camera]** Low obstacle: with ~2 m clear ahead, the operator puts a ~10 cm tall box (a shoebox
+      on its side, a book stack) ~1 m straight ahead. `rlnav status` must show `camera_nearest=~1.0 m at ~+0 deg`,
+      while `nearest` (the lidar) does **not** see it. Move it ~0.8 m ahead and ~0.4 m to the left: the
+      camera angle goes positive (~+25 deg). The UI shows purple wedges in the camera cone.
+      Then with the floor clear, `camera_nearest=-` in most readings (an occasional phantom is OK).
+      If the clear floor reads as obstacles all the time, check `camera_pitch_deg` (step 2.5) and stop.
 
 ## Phase 4: Command path sign checks (🛑 MOTION, tiny, operator present)
 
@@ -229,8 +240,14 @@ another pane and watch for `stale=True` or long streaks of `blocked=True`.
 - [ ] 6.3 🛑 MOTION. Navigation mode with a map only: the operator clicks a point 3-4 m away on the UI's
       map and presses **Drive**. Pass: the robot ends within ~0.3-0.5 m of the clicked point on the
       map (map goals follow AMCL's corrections).
+- [ ] 6.4 🛑 MOTION. **[camera]** Low obstacle: a ~10 cm tall box on the straight line to `rlnav goal 3 0`,
+      ~1.5 m ahead. Pass: it goes around without touching it (the lidar can't see it; the hard stop
+      won't save it). 3 runs; record reached, closest approach, and whether it ever reversed.
+      If it drives straight into it, stop: check step 3.6 again.
 
-Known limits, not failures: obstacles lower than ~17 cm and overhangs are invisible to it; glass and
+Known limits, not failures: obstacles lower than ~17 cm are invisible to lidar-only policies, and to
+camera policies outside the camera's forward cone or closer than ~0.3 m (keep them out of reach when
+reversing or turning in place); overhangs; glass and
 mirrors; moving people; goals beyond 5 m are refused; the policy is bang-bang (nearly always full
 speed and full turn rate), so motion can look jerky.
 
@@ -250,6 +267,7 @@ Code:                branch <..> @ <commit>; policy md5s match? <yes/no>
 Backend:             <onnxruntime x.y | numpy>; step_us <..>; node RSS <..> MB, CPU <..> %; free -m before/after
 Interfaces:          rlnav scan line: <paste>; /odom <..> Hz; base_link->base_laser yaw <..> deg; mux present <yes/no>
 Perception:          box left -> <..> deg, right -> <..> deg, front -> <..> deg; self-hits <none | range @ angle>
+Camera:              <n/a | cloud <..> Hz, pitch <..> deg, low box 1 m ahead -> <..>, clear floor phantoms <rare/often>, low-obstacle drives <k>/3>
 Decisions (dry run): goal 2,+1 -> cmd <..>; goal 2,-1 -> cmd <..>
 Sign checks:         drive 0 0.4 1 -> yaw <..> deg, seen turning <left/right>; drive 0.15 0 1 -> <..> m <forward/back>
 Stops:               UI stop <..> s; node kill <..> s; hard stop held <yes/no> (safety_stops <..>)
