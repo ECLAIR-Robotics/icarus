@@ -16,5 +16,6 @@ docker/.env
 
 # mjwarp training output
 mjwarp/logs/
+mjwarp/exported/
 
 nav/
