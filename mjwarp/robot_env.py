@@ -41,16 +41,18 @@ _SCENE_XML = """
     <worldbody>
         <light type="directional" pos="0 0 3" dir="0.3 0.5 -1" diffuse="0.6 0.6 0.6" ambient="0.35 0.35 0.35"/>
         <geom name="ground" type="plane" size="20 20 0.1" friction="0.9 0.01 0.001" rgba="0.35 0.35 0.35 1"/>
-        <geom name="wall_north" type="box" pos="0 3 0.5" size="3 0.05 0.5"/>
-        <geom name="wall_south" type="box" pos="0 -3 0.5" size="3 0.05 0.5"/>
-        <geom name="wall_east" type="box" pos="3 0 0.5" size="0.05 3 0.5"/>
-        <geom name="wall_west" type="box" pos="-3 0 0.5" size="0.05 3 0.5"/>
-        <geom name="crate" type="box" pos="1.5 1.2 0.25" size="0.25 0.25 0.25" rgba="0.6 0.4 0.2 1"/>
-        <geom name="pillar" type="cylinder" pos="-1.4 -1.0 0.5" size="0.15 0.5" rgba="0.3 0.5 0.7 1"/>
-        <geom name="divider" type="box" pos="-1.0 1.8 0.4" size="0.8 0.05 0.4" euler="0 0 30"/>
     </worldbody>
 </mujoco>
 """
+
+# These are the commands to add walls around the existing map. 
+# <geom name="wall_north" type="box" pos="0 3 0.5" size="3 0.05 0.5"/>
+# <geom name="wall_south" type="box" pos="0 -3 0.5" size="3 0.05 0.5"/>
+# <geom name="wall_east" type="box" pos="3 0 0.5" size="0.05 3 0.5"/>
+# <geom name="wall_west" type="box" pos="-3 0 0.5" size="0.05 3 0.5"/>
+# <geom name="crate" type="box" pos="1.5 1.2 0.25" size="0.25 0.25 0.25" rgba="0.6 0.4 0.2 1"/>
+# <geom name="pillar" type="cylinder" pos="-1.4 -1.0 0.5" size="0.15 0.5" rgba="0.3 0.5 0.7 1"/>
+# <geom name="divider" type="box" pos="-1.0 1.8 0.4" size="0.8 0.05 0.4" euler="0 0 30"/>
 
 
 def build_model(pole: bool = False) -> mujoco.MjModel:

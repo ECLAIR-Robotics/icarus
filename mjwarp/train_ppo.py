@@ -1,5 +1,5 @@
 import argparse
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import numpy as np
@@ -179,7 +179,7 @@ def save_checkpoint(
             "policy": policy.state_dict(),
             "optimizer": optimizer.state_dict(),
             "iteration": iteration,
-            "config": config,
+            "config": asdict(config),  # a plain dict: a pickled dataclass only loads where __main__ has the class
         },
         path,
     )

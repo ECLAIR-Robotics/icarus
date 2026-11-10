@@ -2,23 +2,23 @@ import torch
 from torch import nn
 from torch.distributions import Normal
 
-from pole import ACTION_DIM, OBS_DIM
+from pole import ACTION_DIM, HISTORY, OBS_DIM
 
 
 class CartPoleActorCritic(nn.Module):
-    """PPO actor and critic for the pole's observation (pole.OBS_DIM) and action (pole.ACTION_DIM)."""
+    """PPO actor and critic for the pole's observation (OBS_DIM * history) and action (pole.ACTION_DIM)."""
 
-    def __init__(self, hidden_dim: int = 64) -> None:
+    def __init__(self, hidden_dim: int = 64, history: int = HISTORY) -> None:
         super().__init__()
         self.actor = nn.Sequential(
-            nn.Linear(OBS_DIM, hidden_dim),
+            nn.Linear(OBS_DIM * history, hidden_dim),
             nn.Tanh(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.Tanh(),
             nn.Linear(hidden_dim, ACTION_DIM),
         )
         self.critic = nn.Sequential(
-            nn.Linear(OBS_DIM, hidden_dim),
+            nn.Linear(OBS_DIM * history, hidden_dim),
             nn.Tanh(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.Tanh(),

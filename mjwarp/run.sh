@@ -4,17 +4,22 @@
 # container (a shell started via scripts/docker-shell.sh) -- this needs ROS 2 + rclpy,
 # which only exist there, not on the bare host.
 #
-#   mjwarp/run.sh
+#   mjwarp/run.sh -m                 manual teleop (add -p for a passive pole)
+#   mjwarp/run.sh -p                 the trained policy balances the pole (CHECKPOINT=PATH to override)
 #   mjwarp/run.sh -t [--iterations N --nworld N --checkpoint PATH]   (see train_ppo.py --help)
 #
 # Ctrl+C stops the bridge node and tears down everything else this script started.
+
+MJWARP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEFAULT_CHECKPOINT="$MJWARP_DIR/Checkpoint_Saves/cartpole_ppo.pt"
+CHECKPOINT="${CHECKPOINT:-$DEFAULT_CHECKPOINT}"
 
 usage() {
     echo "Usage: $0 [-m] [-n ####] [-t [train_ppo options]] [-p]"
     echo "  -m          Run a manual control instance"
     echo "  -n ####     Run with N-world instances"
     echo "  -t          Train the balancing policy with PPO (headless; implies the pole)"
-    echo "  -p          Mount the balancing pole on the robot"
+    echo "  -p          Mount the pole; on its own, run the trained policy ($DEFAULT_CHECKPOINT), or a passive pole if none"
     echo ""
     echo "Options after -t are passed to train_ppo.py:"
     echo "  --iterations N            PPO iterations (default 500)"
@@ -45,6 +50,7 @@ while getopts "mn:tp" flag; do
             if [ -n "$RUN_TYPE" ]; then usage; fi
             RUN_TYPE="TRAIN"
             WITH_POLE=true
+            break  # getopts would choke on train_ppo's --long options; forward the rest as-is
             ;;
         p)
             WITH_POLE=true
@@ -58,12 +64,11 @@ done
 shift $((OPTIND - 1))  # whatever is left is forwarded to train_ppo.py with -t
 
 if [ -z "$RUN_TYPE" ]; then
-    usage
+    if [ "$WITH_POLE" = true ]; then RUN_TYPE="POLICY"; else usage; fi
 fi
 
 set -euo pipefail
 
-MJWARP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 URDF_PATH="/root/icarus/innate-os/ros2_ws/src/mars_bot/mars_sim/urdf/mars.urdf"
 
 note() { printf '\033[1;34m==>\033[0m %s\n' "$*" >&2; }
@@ -87,7 +92,14 @@ if [ "$RUN_TYPE" = "AUTO" ]; then
     exec python3 collect.py "$NUM_OF_INSTANCES"
 fi
 
-# RUN_TYPE = MANUAL from here on: this path needs ROS 2 + the innate-os underlay.
+if [ "$RUN_TYPE" = "POLICY" ]; then
+    if [ ! -f "$CHECKPOINT" ]; then
+        note "No checkpoint at $CHECKPOINT (train one with: $0 -t) -- running the pole passively under physics."
+        RUN_TYPE="MANUAL"
+    fi
+fi
+
+# RUN_TYPE = MANUAL or POLICY from here on: this path needs ROS 2 + the innate-os underlay.
 [ -f /opt/ros/humble/setup.bash ] || die "ROS 2 not found -- run this inside the icarus-dev container (scripts/docker-shell.sh), not the bare host."
 echo "${AMENT_PREFIX_PATH:-}" | grep -q "innate-os/ros2_ws/install" ||
     die "innate-os underlay not sourced -- run 'scripts/build.sh --underlay' once, then open a fresh shell."
@@ -128,12 +140,21 @@ sleep 2
 
 note "Starting MJWarp bridge node (background)..."
 cd "$MJWARP_DIR"
-python3 ros_bridge.py --ros-args -p "pole:=$WITH_POLE" &
-pids+=("$!")
+bridge_args=(-p "pole:=$WITH_POLE")
+if [ "$RUN_TYPE" = "POLICY" ]; then bridge_args+=(-p "policy:=$CHECKPOINT"); fi
+python3 ros_bridge.py --ros-args "${bridge_args[@]}" &
+bridge_pid=$!
+pids+=("$bridge_pid")
 sleep 2
 
 note "Confirming exactly one of each node is up..."
 ros2 node list
+
+if [ "$RUN_TYPE" = "POLICY" ]; then
+    note "Policy $CHECKPOINT is balancing the pole. Ctrl+C stops everything."
+    wait "$bridge_pid" || true
+    exit 0
+fi
 
 note "Starting teleop_twist_keyboard -- this terminal now reads your keystrokes directly."
 note "WASD (per its own on-screen legend) drives the base; arm/head hold their actuated zero pose."

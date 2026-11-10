@@ -18,8 +18,13 @@ N_SUBSTEPS = 5
 # Pole past this angle from vertical has fallen.
 _POLE_DONE = 0.5
 
-# obs: pole angular speed, angle from vertical
-OBS_DIM = 2
+# obs: pole axis x, y in the base frame (0 when upright), then its angular velocity x, y, z
+OBS_DIM = 5
+# The policy sees the last HISTORY observations (oldest first, flattened). Differences between
+# frames give the pole's angular acceleration and show how the base's recent commands have
+# been acting on it, which no single frame can.
+HISTORY = 4
+STACKED_OBS_DIM = OBS_DIM * HISTORY
 # action: normalized (forward, turn), scaled to the base's speed limits by MarsWarpEnv
 ACTION_DIM = 2
 
@@ -80,17 +85,26 @@ def tilt_angle(axis: np.ndarray) -> np.ndarray:
     return np.arccos(np.clip(axis[:, 2], -1.0, 1.0))
 
 
+def rotate(quat: np.ndarray, vec: np.ndarray) -> np.ndarray:
+    """Rotate vec by the unit quaternions (w, x, y, z)."""
+    w, u = quat[:, :1], quat[:, 1:4]
+    t = 2.0 * np.cross(u, vec)
+    return vec + w * t + np.cross(u, t)
+
+
 def observe(qpos: np.ndarray, qvel: np.ndarray, qadr: int, dadr: int) -> np.ndarray:
-    axis = pole_axis(qpos[:, qadr : qadr + 4])
-    # Ball joint has no single signed rate, so this is the speed of the pole.
-    rate = np.linalg.norm(qvel[:, dadr : dadr + 3], axis=1)
+    quat = qpos[:, qadr : qadr + 4]
+    axis = pole_axis(quat)
+    # A ball joint's angular velocity is in the pole's own frame; express it in the base frame
+    # so it lines up with the axis (and with the base's forward/turn directions).
+    omega = rotate(quat, qvel[:, dadr : dadr + 3])
     obs = np.empty((qpos.shape[0], OBS_DIM), dtype=np.float32)
-    obs[:, 0] = rate
-    obs[:, 1] = tilt_angle(axis)
+    obs[:, 0:2] = axis[:, 0:2]  # lean direction and size: the sign says which way to push
+    obs[:, 2:5] = omega
     return obs
 
 
 def score(obs: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """(reward, done): 1 per step while the pole is up, 0 once it has fallen."""
-    done = obs[:, 1] > _POLE_DONE
+    done = np.hypot(obs[:, 0], obs[:, 1]) > np.sin(_POLE_DONE)
     return np.where(done, np.float32(0.0), np.float32(1.0)), done

@@ -19,6 +19,9 @@ CAMERAS = (HEAD_CAMERA, WRIST_CAMERA)
 DEPTH_SCALE_M = 10.0
 
 
+NJMAX = 256
+
+
 class MarsWarpEnv:
     """`nworld` MARS robots simulated in parallel on the GPU. Commands take a scalar (all
     worlds) or one value per world; each `step()` advances one control period.
@@ -34,11 +37,14 @@ class MarsWarpEnv:
         cameras: bool = False,
         pole: bool = False,
         seed: int | None = None,
+        history: int = pole_lib.HISTORY,
     ) -> None:
         self.pole = pole
         self.mj_model = build_model(pole=pole)
         self.model = mjw.put_model(self.mj_model)
-        self.data = mjw.make_data(self.mj_model, nworld=nworld)
+        # njmax is the per-world constraint buffer; the default 64 overflows once the pole and wheels
+        # are in contact, and overflowing rows are dropped (nefc overflow warning).
+        self.data = mjw.make_data(self.mj_model, nworld=nworld, njmax=NJMAX)
         self.nworld = nworld
         self.control_period = 1.0 / control_hz
         self.substeps = round(self.control_period / self.mj_model.opt.timestep)
@@ -54,6 +60,8 @@ class MarsWarpEnv:
         if pole:
             self._rng = np.random.default_rng(seed)
             self._pole_qpos, self._pole_dof = pole_lib.joint_addrs(self.mj_model, "robot_pole")
+            self._pole_graphs: dict[bool, wp.Graph] = {}
+            self._history = np.zeros((nworld, history, pole_lib.OBS_DIM), dtype=np.float32)
 
         self._step_graph: wp.Graph | None = None
         self._snapshot = mujoco.MjData(self.mj_model)
@@ -83,40 +91,64 @@ class MarsWarpEnv:
             pole_lib.tilt_pole(qpos, self._pole_qpos, self._rng, np.ones(self.nworld, dtype=bool))
             self.data.qpos.assign(qpos)
         mjw.forward(self.model, self.data)
+        if self.pole:
+            self._history[:] = self._observe()[:, None]
 
-    def pole_observation(self) -> np.ndarray:
-        """(nworld, pole.OBS_DIM): pole angular speed and angle from vertical. Reads device
-        state back to the host."""
-        self._require_pole()
+    def _observe(self) -> np.ndarray:
         return pole_lib.observe(self.data.qpos.numpy(), self.data.qvel.numpy(), self._pole_qpos, self._pole_dof)
 
-    def pole_step(self, action: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def pole_observation(self) -> np.ndarray:
+        """(nworld, history * pole.OBS_DIM): the last `history` observations, oldest first. Each is
+        the pole axis x/y and angular velocity in the base frame. Right after a reset the
+        history is the starting observation repeated."""
+        self._require_pole()
+        return self._history.reshape(self.nworld, -1).copy()  # a copy: callers may wrap it without copying
+
+    def pole_step(
+        self, action: np.ndarray, sensors: bool = False
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Hold one normalized (forward, turn) command, shape (nworld, pole.ACTION_DIM), for
-        10 ms. Returns obs, reward, and which worlds fell; those worlds are reset in place."""
+        10 ms. Returns obs, reward, and which worlds fell; those worlds are reset in place.
+        `sensors` evaluates the sensors on the last substep (odometry, lidar) for ROS use;
+        training leaves it off."""
         self._require_pole()
         action = np.clip(np.asarray(action, dtype=np.float32), -1.0, 1.0)
         if action.shape != (self.nworld, pole_lib.ACTION_DIM):
             raise ValueError(f"action must have shape ({self.nworld}, {pole_lib.ACTION_DIM}), got {action.shape}")
         self.drive(action[:, 0] * world.MAX_BASE_LINEAR_SPEED, action[:, 1] * world.MAX_BASE_ANGULAR_SPEED)
         self.data.ctrl.assign(self.ctrl)
-        # The pole observation reads joint state, so skip the lidar and other sensors.
-        sensors_on = self.model.opt.disableflags
-        self.model.opt.disableflags = sensors_on | mjw.DisableBit.SENSOR
-        for _ in range(pole_lib.N_SUBSTEPS):
-            mjw.step(self.model, self.data)
-        self.model.opt.disableflags = sensors_on
+        if sensors not in self._pole_graphs:
+            self._pole_graphs[sensors] = self._capture_pole_step(sensors)
+        wp.capture_launch(self._pole_graphs[sensors])
 
         qpos, qvel = self.data.qpos.numpy(), self.data.qvel.numpy()
         obs = pole_lib.observe(qpos, qvel, self._pole_qpos, self._pole_dof)
         reward, done = pole_lib.score(obs)
+        self._history[:, :-1] = self._history[:, 1:]
+        self._history[:, -1] = obs
         if np.any(done):
             qpos[done] = self.mj_model.key("home").qpos
             pole_lib.tilt_pole(qpos, self._pole_qpos, self._rng, done)
             qvel[done] = 0.0
             self.data.qpos.assign(qpos)
             self.data.qvel.assign(qvel)
-            obs = pole_lib.observe(qpos, qvel, self._pole_qpos, self._pole_dof)
-        return obs, reward, done
+            # A fallen world's history belongs to the old episode: restart it from the new pole.
+            self._history[done] = pole_lib.observe(qpos, qvel, self._pole_qpos, self._pole_dof)[done][:, None]
+        return self.pole_observation(), reward, done
+
+    def _capture_pole_step(self, sensors: bool) -> wp.Graph:
+        """One 10 ms command as a CUDA graph; launching kernels one by one from Python costs
+        ~30x more than the physics itself. The pole observation reads joint state, so the
+        lidar and other sensors are skipped, except on the last substep when `sensors`."""
+        sensors_on = self.model.opt.disableflags
+        with wp.ScopedCapture() as capture:
+            self.model.opt.disableflags = sensors_on | mjw.DisableBit.SENSOR
+            for substep in range(pole_lib.N_SUBSTEPS):
+                if sensors and substep == pole_lib.N_SUBSTEPS - 1:
+                    self.model.opt.disableflags = sensors_on
+                mjw.step(self.model, self.data)
+            self.model.opt.disableflags = sensors_on
+        return capture.graph
 
     def _require_pole(self) -> None:
         if not self.pole:

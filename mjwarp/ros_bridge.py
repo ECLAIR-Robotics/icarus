@@ -17,7 +17,7 @@ from visualization_msgs.msg import Marker
 
 import _driver_pkg  # noqa: F401 -- puts mars_sim_driver on sys.path
 from mars_sim_driver.constants import CAMERA_CX, CAMERA_CY, CAMERA_FX, CAMERA_FY, CAMERA_HEIGHT, CAMERA_WIDTH
-from pole import POLE_LENGTH, POLE_PIVOT_Z, POLE_RADIUS
+from pole import ACTION_DIM, HISTORY, OBS_DIM, N_SUBSTEPS, POLE_LENGTH, POLE_PIVOT_Z, POLE_RADIUS
 from robot_env import ARM_JOINTS, DRIVEN_JOINTS, HEAD_CAMERA, LIDAR_RAYS, WRIST_CAMERA
 from warp_env import MarsWarpEnv
 
@@ -36,6 +36,28 @@ DEPTH_MIN_M, DEPTH_MAX_M = 0.25, 2.0
 
 HEAD_FRAME = "camera_optical_frame"
 WRIST_FRAME = "arm_camera_link"
+
+
+def load_policy(path: str):
+    """The deterministic actor from a train_ppo.py checkpoint, on the CPU."""
+    import torch
+
+    from policy import CartPoleActorCritic
+
+    # Checkpoints from before the config was saved as a dict pickled PPOConfig as __main__.PPOConfig
+    # (train_ppo.py ran as a script), so make that name resolvable while loading.
+    import __main__
+
+    from train_ppo import PPOConfig
+
+    if not hasattr(__main__, "PPOConfig"):
+        __main__.PPOConfig = PPOConfig
+    checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+    # The first layer's width is OBS_DIM * history, so the history length comes from the weights.
+    history = checkpoint["policy"]["actor.0.weight"].shape[1] // OBS_DIM
+    policy = CartPoleActorCritic(history=history)
+    policy.load_state_dict(checkpoint["policy"])
+    return policy.eval(), history
 
 
 def vector3(values: np.ndarray) -> Vector3:
@@ -67,7 +89,12 @@ def head_camera_info(header: Header) -> CameraInfo:
 class MarsSimBridge(Node):
     def __init__(self) -> None:
         super().__init__("mars_warp_sim")
-        self.env = MarsWarpEnv(cameras=True, pole=self.declare_parameter("pole", False).value)
+        policy_path = self.declare_parameter("policy", "").value
+        self._policy, history = load_policy(policy_path) if policy_path else (None, HISTORY)
+        self.env = MarsWarpEnv(
+            cameras=True, pole=bool(policy_path) or self.declare_parameter("pole", False).value, history=history
+        )
+        self._pole_obs = self.env.pole_observation() if self._policy else None
 
         # Warp JIT-compiles each kernel the first time it actually runs, printing one
         # "...(compiled)" line per kernel -- there's no single signal for "all done" from Warp
@@ -76,6 +103,10 @@ class MarsSimBridge(Node):
         print("Compiling MJWarp CUDA kernels (first run only; can take a couple of minutes)...", flush=True)
         self.env.step()
         self.env.render()
+        if self._policy:
+            self.env.pole_step(np.zeros((1, ACTION_DIM)), sensors=True)
+            self.env.reset()
+            self._pole_obs = self.env.pole_observation()
         print("MJWarp ready -- kernel compilation done.", flush=True)
 
         self.state = self.env.snapshot()
@@ -105,7 +136,11 @@ class MarsSimBridge(Node):
         self.create_subscription(Float64MultiArray, "/mars/arm/commands", self._on_arm_command, qos_profile_sensor_data)
         self.create_subscription(Int32, "/mars/head/set_position", self._on_head_position, 10)
 
-        self.create_timer(self.env.control_period, self._step)
+        if self._policy:
+            # The policy was trained on 10 ms commands; it drives the base, so /cmd_vel is ignored.
+            self.create_timer(N_SUBSTEPS * self.env.mj_model.opt.timestep, self._policy_step)
+        else:
+            self.create_timer(self.env.control_period, self._step)
         self.create_timer(1.0 / ODOM_HZ, self._publish_odom)
         self.create_timer(1.0 / JOINT_STATE_HZ, self._publish_joint_states)
         self.create_timer(1.0 / SCAN_HZ, self._publish_scan)
@@ -134,6 +169,16 @@ class MarsSimBridge(Node):
 
     def _on_head_position(self, msg: Int32) -> None:
         self.env.set_head(math.radians(msg.data))
+
+    def _policy_step(self) -> None:
+        import torch
+
+        with torch.no_grad():
+            action = self._policy(torch.as_tensor(self._pole_obs, dtype=torch.float32)).numpy()
+        self._pole_obs, _, _ = self.env.pole_step(action, sensors=True)  # resets itself if the pole falls
+        self.state = self.env.snapshot()
+        if self._viewer is not None and self._viewer.is_running():
+            self._viewer.sync()
 
     def _step(self) -> None:
         if (self.get_clock().now() - self._last_cmd_vel).nanoseconds > CMD_VEL_TIMEOUT_S * 1e9:
